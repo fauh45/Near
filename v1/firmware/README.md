@@ -21,7 +21,7 @@ To make sure that each device only connected to the network they want, they coul
 ## Progress
 
 - [ ] Implement Improv WiFi through BLE
-  - [ ] Setup GAP & GATT broadcast
+  - [x] Setup GAP & GATT broadcast
   - [ ] Setup RPC to handle WiFi connection
   - [ ] Add custom RPC to setup network id
 - [ ] Setup MQTT connection
