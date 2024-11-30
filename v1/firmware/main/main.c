@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
+#include "esp_gatt_defs.h"
 #include "esp_gatts_api.h"
 
 #include "sdkconfig.h"
@@ -25,10 +27,18 @@
 #define IMPROV_APP_ID 0
 #define IMPROV_WIFI_SERVICE_DATA_LEN 6
 #define IMPROV_WIFI_SVC_DATA_UUID 0x4677
+// How many characteristics does the Improv WiFi have
+#define IMPROV_WIFI_CHAR_LEN 5
 
-// TODO: change the attribute handle number to match the number of
-// attributes on Improv WiFi
-#define IMPROV_WIFI_GATTS_HANDLE_LEN 1
+// 1 for Service handle
+// For each characteristics:
+// - Characteristics handle
+// - Characteristics value handle (for READ property)
+// - Descriptor handle
+//
+// Improv WiFi got 4 READ property characteristics, 1 WRITE
+#define IMPROV_WIFI_GATTS_HANDLE_LEN                                           \
+  1 + ((IMPROV_WIFI_GATTS_HANDLE_LEN - 1) * 3) + (1 * 2)
 
 #define adv_config_flag (1 << 0)
 #define scan_rsp_config_flag (1 << 1)
@@ -47,6 +57,11 @@ struct gatts_profile_inst {
   uint16_t service_handle;
   // GATTS service identifier representation
   esp_gatt_srvc_id_t service_id;
+};
+
+// GATT Characteristics representation
+struct gatts_char_inst {
+  // TODO: add a callback for write and read, or just let it be on one function?
   uint16_t char_handle;
   esp_bt_uuid_t char_uuid;
   esp_gatt_perm_t perm;
@@ -66,8 +81,19 @@ static struct gatts_profile_inst improv_gatts_data = {
     .gatts_if = ESP_GATT_IF_NONE,
     .service_id = {.is_primary = true,
                    .id = {.inst_id = 0x00,
-                          .uuid = {.len = ESP_UUID_LEN_16,
-                                   .uuid.uuid16 = IMPROV_WIFI_SVC_DATA_UUID}}}};
+                          // Equal to "00467768-6228-2272-4663-277478268000"
+                          // (Improv WiFi GATTS Service UUID)
+                          .uuid = {.len = ESP_UUID_LEN_128,
+                                   .uuid.uuid128 = {0x00, 0x80, 0x26, 0x78,
+                                                    0x74, 0x27, 0x63, 0x46,
+                                                    0x72, 0x22, 0x28, 0x62,
+                                                    0x68, 0x77, 0x46, 0x00}}}},
+};
+
+// TODO: add improv characteristics here, and add their ID
+static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
+
+};
 
 // Service data as required on BT LE advertisement for Improv WiFi
 // https://www.improv-wifi.com/ble/ (Service Data format)
@@ -175,22 +201,14 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
              param->create.status, param->create.service_handle);
 
     improv_gatts_data.service_handle = param->create.service_handle;
-    improv_gatts_data.char_uuid.len = ESP_UUID_LEN_16;
-    improv_gatts_data.char_uuid.uuid.uuid16 = IMPROV_WIFI_SVC_DATA_UUID;
 
     esp_ble_gatts_start_service(improv_gatts_data.service_handle);
 
-    // TODO: add characteristic
+    // TODO: add characteristics
     break;
 
+  // This event is triggered when a GATT client is connected to our GATT server
   case ESP_GATTS_CONNECT_EVT:
-    esp_ble_conn_update_params_t conn_params = {0};
-
-    conn_params.latency = 0;
-    conn_params.max_int = 0x20; // max_int = 0x20*1.25ms = 40ms
-    conn_params.min_int = 0x10; // min_int = 0x10*1.25ms = 20ms
-    conn_params.timeout = 400;  // timeout = 400*10ms = 4000ms
-
     ESP_LOGI(NEAR_TAG,
              "ESP_GATTS_CONNECT_EVT, conn_id %d, remote "
              "%02x:%02x:%02x:%02x:%02x:%02x:",
@@ -199,14 +217,16 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
              param->connect.remote_bda[3], param->connect.remote_bda[4],
              param->connect.remote_bda[5]);
     improv_gatts_data.conn_id = param->connect.conn_id;
-
-    // start sent the update connection parameters to the peer device.
-    esp_ble_gap_update_conn_params(&conn_params);
     break;
 
+  // This event is triggered when a GATT client is disconneted to our GATT
+  // server
   case ESP_GATTS_DISCONNECT_EVT:
     ESP_LOGI(NEAR_TAG, "ESP_GATTS_DISCONNECT_EVT, disconnect reason 0x%x",
              param->disconnect.reason);
+    // Re-start advertising when the connection is disconneted, on the future,
+    // might not do this, instead re-start advertising only after the user have
+    // pushed the button?
     esp_ble_gap_start_advertising(&adv_params);
     break;
 
