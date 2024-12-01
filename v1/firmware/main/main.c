@@ -26,27 +26,29 @@
 
 #define IMPROV_APP_ID 0
 #define IMPROV_WIFI_SERVICE_DATA_LEN 6
-#define IMPROV_WIFI_SVC_DATA_UUID 0x4677
 // How many characteristics does the Improv WiFi have
 #define IMPROV_WIFI_CHAR_LEN 5
 
-// 1 for Service handle
-// For each characteristics:
-// - Characteristics handle
-// - Characteristics value handle (for READ property)
-// - Descriptor handle
-//
-// Improv WiFi got 4 READ property characteristics, 1 WRITE
-#define IMPROV_WIFI_GATTS_HANDLE_LEN                                           \
-  1 + ((IMPROV_WIFI_GATTS_HANDLE_LEN - 1) * 3) + (1 * 2)
+#define IMPROV_WIFI_GATTS_HANDLE_LEN 16
 
-#define adv_config_flag (1 << 0)
-#define scan_rsp_config_flag (1 << 1)
+// Improv WiFi state flags, this explains the current statet the device is in
+typedef enum {
+  // Awaiting auth through physical interraction
+  AUTH_REQUIRED = 0x01,
+  // Ready to accept credentials
+  AUTHORIZED = 0x02,
+  // Credentials have been received, attempting to connect
+  PROVISIONING = 0x03,
+  // Connection is successful
+  PROVISIONED = 0x04
+} improv_wifi_state;
 
 // Flag to indicate which configuration have been done or not
 // <- LSB ------------------------------------------------------ MSB ->
 // adv_data_config, scan_rsp_config, none, none, none, none, none, none
 static uint8_t config_flags = 0;
+#define adv_config_flag (1 << 0)
+#define scan_rsp_config_flag (1 << 1)
 
 // GATT Profile representation, contains the identification, connection, etc
 struct gatts_profile_inst {
@@ -90,9 +92,67 @@ static struct gatts_profile_inst improv_gatts_data = {
                                                     0x68, 0x77, 0x46, 0x00}}}},
 };
 
-// TODO: add improv characteristics here, and add their ID
-static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
+// Which characteristics idx is being initialize current
+static int gatts_add_char_init_idx = 0;
 
+// Identifier of all the characteristics available on Improv WiFi
+static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
+    // "Capabilities" characteristics
+    [0] =
+        {// Equal to "00467768-6228-2272-4663-277478268005"
+         // (Improv WiFi "Capabilities" characteristics UUID)
+         .char_uuid = {.len = ESP_UUID_LEN_128,
+                       .uuid.uuid128 = {0x05, 0x80, 0x26, 0x78, 0x74, 0x27,
+                                        0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
+                                        0x68, 0x77, 0x46, 0x00}},
+         .property =
+             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+         .perm = ESP_GATT_PERM_READ},
+    // "Current State" characteristics
+    [1] =
+        {// Equal to "00467768-6228-2272-4663-277478268001"
+         // (Improv WiFi "Current State" characteristics UUID)
+         .char_uuid = {.len = ESP_UUID_LEN_128,
+                       .uuid.uuid128 = {0x01, 0x80, 0x26, 0x78, 0x74, 0x27,
+                                        0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
+                                        0x68, 0x77, 0x46, 0x00}},
+         .property =
+             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+         .perm = ESP_GATT_PERM_READ
+
+        },
+    // "Error state" characteristics
+    [2] =
+        {// Equal to "00467768-6228-2272-4663-277478268002"
+         // (Improv WiFi "Error State" characteristics UUID)
+         .char_uuid = {.len = ESP_UUID_LEN_128,
+                       .uuid.uuid128 = {0x02, 0x80, 0x26, 0x78, 0x74, 0x27,
+                                        0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
+                                        0x68, 0x77, 0x46, 0x0}},
+         .property =
+             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+         .perm = ESP_GATT_PERM_READ},
+    // "RPC Command" characteristics
+    [3] =
+        {// Equal to "00467768-6228-2272-4663-277478268003"
+         // (Improv WiFi "RPC Command" characteristics UUID)
+         .char_uuid = {.len = ESP_UUID_LEN_128,
+                       .uuid.uuid128 = {0x03, 0x80, 0x26, 0x78, 0x74, 0x27,
+                                        0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
+                                        0x68, 0x77, 0x46, 0x00}},
+         .property = ESP_GATT_CHAR_PROP_BIT_WRITE,
+         .perm = ESP_GATT_PERM_WRITE},
+    // "RPC Result" characteristics
+    [4] =
+        {// Equal to "00467768-6228-2272-4663-277478268004"
+         // (Improv WiFi "RPC Result" characteristics UUID)
+         .char_uuid = {.len = ESP_UUID_LEN_128,
+                       .uuid.uuid128 = {0x04, 0x80, 0x26, 0x78, 0x74, 0x27,
+                                        0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
+                                        0x68, 0x77, 0x46, 0x00}},
+         .property =
+             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+         .perm = ESP_GATT_PERM_READ},
 };
 
 // Service data as required on BT LE advertisement for Improv WiFi
@@ -101,7 +161,7 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
 // <- LSB ----------------------------------------------------- MSB ->
 // current state, capabilities, reserved, reserved, reserved, reserved
 static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
-    0x2, 0x0, 0x0, 0x0, 0x0, 0x0};
+    AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
 
 // GATT advertising data, sent to all the surrounding client
 static esp_ble_adv_data_t adv_data = {
@@ -152,6 +212,20 @@ static esp_ble_adv_params_t adv_params = {
     .channel_map = ADV_CHNL_ALL,
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY};
 
+// Add the current characteristics idx, if the idx > characteristics number, it
+// ignores it
+void gatts_add_curr_char_idx() {
+  if (gatts_add_char_init_idx < IMPROV_WIFI_CHAR_LEN) {
+    esp_ble_gatts_add_char(
+        improv_gatts_data.service_handle,
+        &improv_gatts_char_data[gatts_add_char_init_idx].char_uuid,
+        improv_gatts_char_data[gatts_add_char_init_idx].perm,
+        improv_gatts_char_data[gatts_add_char_init_idx].property,
+        // TODO: learn what to put here? seems to be optional?
+        NULL, NULL);
+  }
+}
+
 static void gatts_event_handler(esp_gatts_cb_event_t event,
                                 esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t *param) {
@@ -187,7 +261,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
       config_flags |= scan_rsp_config_flag;
 
       esp_ble_gatts_create_service(gatts_if, &improv_gatts_data.service_id,
-                                   IMPROV_WIFI_SERVICE_DATA_LEN);
+                                   IMPROV_WIFI_GATTS_HANDLE_LEN);
     } else {
       ESP_LOGI(NEAR_TAG,
                "Reg app profile registration failed, appn id %04x, status %d",
@@ -202,9 +276,30 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
 
     improv_gatts_data.service_handle = param->create.service_handle;
 
+    // Start the service so the GATT client could read if there's this GATSS
+    // service
     esp_ble_gatts_start_service(improv_gatts_data.service_handle);
 
-    // TODO: add characteristics
+    // Start inititalizing the first characteristics
+    gatts_add_curr_char_idx();
+    break;
+
+  // This event is triggered when a characteristics have been added
+  case ESP_GATTS_ADD_CHAR_EVT:
+    ESP_LOGI(NEAR_TAG,
+             "ADD_CHAR_EVT, status %d,  attr_handle %d, service_handle %d",
+             param->add_char.status, param->add_char.attr_handle,
+             param->add_char.service_handle);
+
+    // If the characteristics is successfully added, save the handles, and go to
+    // the next characteristics to initialize
+    if (param->add_char.status == ESP_OK) {
+      improv_gatts_char_data[gatts_add_char_init_idx].char_handle =
+          param->add_char.attr_handle;
+
+      gatts_add_char_init_idx++;
+      gatts_add_curr_char_idx();
+    }
     break;
 
   // This event is triggered when a GATT client is connected to our GATT server
@@ -318,9 +413,9 @@ void app_main(void) {
   // Check if the NVS have no free space, or there's a newer version, we can
   // safely remove it and retry.
   //
-  // NOTE: Might make the BT/WiFI credentials broken? Although we probably have
-  // namespaces, so it won't be too full? Might be broken after flash though, if
-  // the size(new) > size(old)
+  // NOTE: Might make the BT/WiFI credentials broken? Although we probably
+  // have namespaces, so it won't be too full? Might be broken after flash
+  // though, if the size(new) > size(old)
   if (res == ESP_ERR_NVS_NO_FREE_PAGES ||
       res == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
