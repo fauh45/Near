@@ -30,7 +30,7 @@
 // How many characteristics does the Improv WiFi have
 #define IMPROV_WIFI_CHAR_LEN 5
 
-#define IMPROV_WIFI_GATTS_HANDLE_LEN 16
+#define IMPROV_WIFI_GATTS_HANDLE_LEN 20
 
 // Improv WiFi state flags, this explains the current statet the device is in
 typedef enum {
@@ -272,7 +272,7 @@ static esp_ble_adv_data_t adv_data = {
     // Connection intervals are based on 1.25ms units
     .min_interval = 0x6,
     .max_interval = 0x10,
-    .appearance = ESP_BLE_APPEARANCE_GENERIC_TAG,
+    .appearance = ESP_BLE_APPEARANCE_UNKNOWN,
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
     .service_data_len = sizeof(improv_wifi_service_data),
@@ -291,7 +291,7 @@ static esp_ble_adv_data_t scan_rsp_data = {
     // Connection intervals are based on 1.25ms units
     .min_interval = 0x6,
     .max_interval = 0x10,
-    .appearance = ESP_BLE_APPEARANCE_GENERIC_TAG,
+    .appearance = ESP_BLE_APPEARANCE_UNKNOWN,
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
@@ -394,16 +394,49 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     // If the characteristics is successfully added, save the handles, and go to
     // the next characteristics to initialize
     if (param->add_char.status == ESP_OK) {
+      // Save the handle so it could be used on read/write events
       improv_gatts_char_data[gatts_add_char_init_idx].char_handle =
           param->add_char.attr_handle;
 
-      gatts_add_char_init_idx++;
-      gatts_add_curr_char_idx();
+      // Add CCC descriptor if notify bit is set, the CCC descriptor standard
+      // does call for CCC descriptor for either/both notify and indicate
+      // BT_CONTROLLER_INIT_CONFIG_DEFAULT
+      //
+      // https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/host/generic-attribute-profile--gatt-.html
+      // (Section 3.3.3.3)
+
+      // Save the attributes of the characteristics
+      improv_gatts_char_data[gatts_add_char_init_idx].descr_uuid.len =
+          ESP_UUID_LEN_16;
+      improv_gatts_char_data[gatts_add_char_init_idx].descr_uuid.uuid.uuid16 =
+          ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
+
+      esp_ble_gatts_add_char_descr(
+          improv_gatts_data.service_handle,
+          &improv_gatts_char_data[gatts_add_char_init_idx].descr_uuid,
+          ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, NULL, NULL);
     }
 
     // NOTE: maybe we should add some descriptor here? might be one way the
     // client able to tell GATTTS server of when to enable or disable
     // notification
+    break;
+
+  case ESP_GATTS_ADD_CHAR_DESCR_EVT:
+    ESP_LOGI(NEAR_TAG,
+             "ADD_DESCR_EVT, status %d, attr_handle %d, service_handle %d",
+             param->add_char.status, param->add_char.attr_handle,
+             param->add_char.service_handle);
+
+    if (param->add_char.status == ESP_OK) {
+      // Save the handle for the characteristics descriptor
+      improv_gatts_char_data[gatts_add_char_init_idx].descr_handle =
+          param->add_char.attr_handle;
+
+      // Continue to initialize the next characteristics
+      gatts_add_char_init_idx++;
+      gatts_add_curr_char_idx();
+    }
     break;
 
   // This event is triggered when the connected GATT client requesting to read a
