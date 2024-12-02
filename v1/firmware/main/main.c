@@ -1,4 +1,5 @@
 #include "esp_bt.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -43,12 +44,32 @@ typedef enum {
   PROVISIONED = 0x04
 } improv_wifi_state;
 
+typedef enum {
+  NO_ERROR = 0x00,
+  INVALID_RPC_PACKET = 0x01,
+  UKNOWN_RPC_CMD = 0x02,
+  UNABLE_TO_CONN = 0x03,
+  NOT_AUTHORIZED = 0x04,
+  UKNOWN_ERR = 0xFF
+} improv_wifi_error_state;
+
 // Flag to indicate which configuration have been done or not
 // <- LSB ------------------------------------------------------ MSB ->
 // adv_data_config, scan_rsp_config, none, none, none, none, none, none
 static uint8_t config_flags = 0;
 #define adv_config_flag (1 << 0)
 #define scan_rsp_config_flag (1 << 1)
+
+// Service data as required on BT LE advertisement for Improv WiFi
+// https://www.improv-wifi.com/ble/ (Service Data format)
+//
+// <- LSB ----------------------------------------------------- MSB ->
+// current state, capabilities, reserved, reserved, reserved, reserved
+static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
+    AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
+
+// Current Improv WiFi error state
+static uint8_t improv_wifi_curr_error_state = NO_ERROR;
 
 // GATT Profile representation, contains the identification, connection, etc
 struct gatts_profile_inst {
@@ -61,9 +82,13 @@ struct gatts_profile_inst {
   esp_gatt_srvc_id_t service_id;
 };
 
+// Characteristics callback type
+typedef void (*char_cb_t)(esp_ble_gatts_cb_param_t *param);
+
 // GATT Characteristics representation
 struct gatts_char_inst {
-  // TODO: add a callback for write and read, or just let it be on one function?
+  // Characteristics callback on READ | WRITE, depends on the property & perm
+  char_cb_t char_cb;
   uint16_t char_handle;
   esp_bt_uuid_t char_uuid;
   esp_gatt_perm_t perm;
@@ -92,6 +117,87 @@ static struct gatts_profile_inst improv_gatts_data = {
                                                     0x68, 0x77, 0x46, 0x00}}}},
 };
 
+// Handle capabilities characteristics read event
+static void capabilities_char_cb(esp_ble_gatts_cb_param_t *param) {
+  // The response that we're going to send of the read event
+  esp_gatt_rsp_t rsp;
+  // Set the response to all zero to initialize it
+  memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+
+  rsp.handle = param->read.handle;
+  rsp.attr_value.len = 1;
+  rsp.attr_value.value[0] = improv_wifi_service_data[1];
+
+  // Respond to the read request
+  //
+  // TODO: if we have more than one service, the gatts if might need to change
+  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
+                              param->read.trans_id, ESP_GATT_OK, &rsp);
+}
+
+// Handle current state characteristics read event
+static void current_state_char_cb(esp_ble_gatts_cb_param_t *param) {
+  // The response that we're going to send of the read event
+  esp_gatt_rsp_t rsp;
+  // Set the response to all zero to initialize it
+  memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+
+  rsp.handle = param->read.handle;
+  rsp.attr_value.len = 1;
+  rsp.attr_value.value[0] = improv_wifi_service_data[0];
+
+  // Respond to the read request
+  //
+  // TODO: if we have more than one service, the gatts if might need to change
+  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
+                              param->read.trans_id, ESP_GATT_OK, &rsp);
+}
+
+// Handle current error state characteristics read event
+static void error_state_char_cb(esp_ble_gatts_cb_param_t *param) {
+  // The response that we're going to send of the read event
+  esp_gatt_rsp_t rsp;
+  // Set the response to all zero to initialize it
+  memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+
+  rsp.handle = param->read.handle;
+  rsp.attr_value.len = 1;
+  rsp.attr_value.value[0] = improv_wifi_curr_error_state;
+
+  // Respond to the read request
+  //
+  // TODO: if we have more than one service, the gatts if might need to change
+  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
+                              param->read.trans_id, ESP_GATT_OK, &rsp);
+}
+
+// Handle RPC command write event
+static void rpc_command_char_cb(esp_ble_gatts_cb_param_t *param) {
+  // TODO: handle short and long write event
+
+  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
+                              param->read.trans_id, ESP_GATT_OK, NULL);
+}
+
+// Handle rpc result state characteristics read event
+static void rpc_result_char_cb(esp_ble_gatts_cb_param_t *param) {
+  // TODO: handle actual rpc result
+
+  // The response that we're going to send of the read event
+  esp_gatt_rsp_t rsp;
+  // Set the response to all zero to initialize it
+  memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+
+  rsp.handle = param->read.handle;
+  rsp.attr_value.len = 0;
+
+  // Respond to the read request
+  //
+  // TODO: if we have more than one service, the gatts if might need to change
+  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
+                              param->read.trans_id, ESP_GATT_OK, &rsp);
+}
+
 // Which characteristics idx is being initialize current
 static int gatts_add_char_init_idx = 0;
 
@@ -107,7 +213,8 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
                                         0x68, 0x77, 0x46, 0x00}},
          .property =
              ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-         .perm = ESP_GATT_PERM_READ},
+         .perm = ESP_GATT_PERM_READ,
+         .char_cb = capabilities_char_cb},
     // "Current State" characteristics
     [1] =
         {// Equal to "00467768-6228-2272-4663-277478268001"
@@ -118,9 +225,8 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
                                         0x68, 0x77, 0x46, 0x00}},
          .property =
              ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-         .perm = ESP_GATT_PERM_READ
-
-        },
+         .perm = ESP_GATT_PERM_READ,
+         .char_cb = current_state_char_cb},
     // "Error state" characteristics
     [2] =
         {// Equal to "00467768-6228-2272-4663-277478268002"
@@ -131,7 +237,8 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
                                         0x68, 0x77, 0x46, 0x0}},
          .property =
              ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-         .perm = ESP_GATT_PERM_READ},
+         .perm = ESP_GATT_PERM_READ,
+         .char_cb = error_state_char_cb},
     // "RPC Command" characteristics
     [3] =
         {// Equal to "00467768-6228-2272-4663-277478268003"
@@ -141,7 +248,8 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
                                         0x63, 0x46, 0x72, 0x22, 0x28, 0x62,
                                         0x68, 0x77, 0x46, 0x00}},
          .property = ESP_GATT_CHAR_PROP_BIT_WRITE,
-         .perm = ESP_GATT_PERM_WRITE},
+         .perm = ESP_GATT_PERM_WRITE,
+         .char_cb = rpc_command_char_cb},
     // "RPC Result" characteristics
     [4] =
         {// Equal to "00467768-6228-2272-4663-277478268004"
@@ -152,16 +260,9 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
                                         0x68, 0x77, 0x46, 0x00}},
          .property =
              ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-         .perm = ESP_GATT_PERM_READ},
+         .perm = ESP_GATT_PERM_READ,
+         .char_cb = rpc_result_char_cb},
 };
-
-// Service data as required on BT LE advertisement for Improv WiFi
-// https://www.improv-wifi.com/ble/ (Service Data format)
-//
-// <- LSB ----------------------------------------------------- MSB ->
-// current state, capabilities, reserved, reserved, reserved, reserved
-static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
-    AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
 
 // GATT advertising data, sent to all the surrounding client
 static esp_ble_adv_data_t adv_data = {
@@ -238,11 +339,10 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
              param->reg.status, param->reg.app_id);
 
     if (param->reg.status == ESP_GATT_OK) {
-      improv_gatts_data.gatts_if = param->reg.app_id;
+      improv_gatts_data.gatts_if = gatts_if;
 
       // Set the device name, might errors out, but we don't really care that
       // much for now
-      // TODO: handle this error somehow
       esp_ble_gap_set_device_name(NEAR_DEVICE_NAME);
 
       // Set the advertisement packet, this will trigger GAP event
@@ -299,6 +399,28 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
 
       gatts_add_char_init_idx++;
       gatts_add_curr_char_idx();
+    }
+
+    // NOTE: maybe we should add some descriptor here? might be one way the
+    // client able to tell GATTTS server of when to enable or disable
+    // notification
+    break;
+
+  // This event is triggered when the connected GATT client requesting to read a
+  // particular characteristics
+  case ESP_GATTS_READ_EVT:
+    ESP_LOGI(NEAR_TAG,
+             "GATT_READ_EVT, conn_id %d, trans_id %" PRIu32 ", handle %d",
+             param->read.conn_id, param->read.trans_id, param->read.handle);
+
+    // Search for the right characteristics by the handle, check the property if
+    // it's read, and call the callback to do the read response
+    for (int i = 0; i < IMPROV_WIFI_CHAR_LEN; i++) {
+      if (param->read.handle == improv_gatts_char_data[i].char_handle) {
+        improv_gatts_char_data[i].char_cb(param);
+
+        break;
+      }
     }
     break;
 
