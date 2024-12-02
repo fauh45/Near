@@ -65,6 +65,12 @@ static uint8_t config_flags = 0;
 //
 // <- LSB ----------------------------------------------------- MSB ->
 // current state, capabilities, reserved, reserved, reserved, reserved
+//
+// TODO: might not be correct, an existing example from the ESP Home team
+// (https://github.com/esphome/esphome/blob/30477c764d9353381ef6e8bf186bae703cffbc7f/esphome/components/esp32_improv/esp32_improv_component.cpp#L207)
+// Also need to figure out how to cycle advertising data, as the standard points
+// out: "If the device cannot fit all of its advertising data in 31 bytes, it
+// should cycle between advertising data."
 static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
     AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
 
@@ -459,7 +465,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     break;
 
   // This event is triggered when the connected GATT client requesting to
-  // write a particular characteristics
+  // write a particular characteristics/descriptor
   case ESP_GATTS_WRITE_EVT:
     ESP_LOGI(NEAR_TAG,
              "GATT_WRITE_EVT, conn_id %d, trans_id %" PRIu32 ", handle %d",
