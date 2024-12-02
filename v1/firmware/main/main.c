@@ -449,12 +449,57 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     // Search for the right characteristics by the handle, check the property if
     // it's read, and call the callback to do the read response
     for (int i = 0; i < IMPROV_WIFI_CHAR_LEN; i++) {
-      if (param->read.handle == improv_gatts_char_data[i].char_handle) {
+      if (param->read.handle == improv_gatts_char_data[i].char_handle &&
+          improv_gatts_char_data[i].property & ESP_GATT_CHAR_PROP_BIT_READ) {
         improv_gatts_char_data[i].char_cb(param);
 
         break;
       }
     }
+    break;
+
+  // This event is triggered when the connected GATT client requesting to
+  // write a particular characteristics
+  case ESP_GATTS_WRITE_EVT:
+    ESP_LOGI(NEAR_TAG,
+             "GATT_WRITE_EVT, conn_id %d, trans_id %" PRIu32 ", handle %d",
+             param->write.conn_id, param->write.trans_id, param->write.handle);
+
+    // Handle GATT client activating NOTIFY or INDICATE flags on CCC descriptor,
+    // the write request will not be a prep (multi packet write request).
+    if (!param->write.is_prep && param->write.len == 2) {
+      ESP_LOGI(NEAR_TAG, "GATT_WRITE_EVT (descr), value len %d, value :",
+               param->write.len);
+      esp_log_buffer_hex(NEAR_TAG, param->write.value, param->write.len);
+
+      uint16_t descr_value = param->write.value[1] << 8 | param->write.value[0];
+
+      // Enable NOTIFY bit on descr
+      if (descr_value == 0x0001) {
+        ESP_LOGI(NEAR_TAG, "notify enable");
+      } else if (descr_value == 0x0000) {
+        ESP_LOGI(NEAR_TAG, "notify/indicate disable ");
+      }
+
+      if (param->write.need_rsp) {
+        esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                    param->write.trans_id, ESP_OK, NULL);
+      }
+    } else {
+      // Search which characteristics for the callback to be called for
+      for (int i = 1; i < IMPROV_WIFI_CHAR_LEN; i++) {
+        // Check which characteristics are being written on, only works with
+        // characteristics that got WRITE bit enabled
+        if (param->write.handle == improv_gatts_char_data[i].char_handle &&
+            improv_gatts_char_data[i].property & ESP_GATT_CHAR_PROP_BIT_WRITE) {
+
+          improv_gatts_char_data[i].char_cb(param);
+        }
+
+        break;
+      }
+    }
+
     break;
 
   // This event is triggered when a GATT client is connected to our GATT server
