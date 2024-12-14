@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "esp_bt_defs.h"
 #include "esp_bt_device.h"
@@ -24,6 +25,8 @@
 
 #define NEAR_TAG "Near"
 #define NEAR_DEVICE_NAME "Near v1"
+
+#define PREPARE_BUF_MAX_SIZE 1024
 
 #define IMPROV_APP_ID 0
 #define IMPROV_WIFI_SERVICE_DATA_LEN 6
@@ -52,6 +55,17 @@ typedef enum {
   NOT_AUTHORIZED = 0x04,
   UKNOWN_ERR = 0xFF
 } improv_wifi_error_state;
+
+// Prepare buffer to hold multiple write packets
+typedef struct {
+  // Buffer data
+  uint8_t *prepare_buf;
+  // Current offset
+  int prepare_len;
+} prepare_buf_type_t;
+
+// Prepare buffer for RPC write, that could be multiple packets long
+static prepare_buf_type_t rpc_prepare_write_env;
 
 // Flag to indicate which configuration have been done or not
 // <- LSB ------------------------------------------------------ MSB ->
@@ -89,7 +103,8 @@ struct gatts_profile_inst {
 };
 
 // Characteristics callback type
-typedef void (*char_cb_t)(esp_ble_gatts_cb_param_t *param);
+typedef void (*char_cb_t)(esp_gatts_cb_event_t event,
+                          esp_ble_gatts_cb_param_t *param);
 
 // GATT Characteristics representation
 struct gatts_char_inst {
@@ -124,7 +139,8 @@ static struct gatts_profile_inst improv_gatts_data = {
 };
 
 // Handle capabilities characteristics read event
-static void capabilities_char_cb(esp_ble_gatts_cb_param_t *param) {
+static void capabilities_char_cb(esp_gatts_cb_event_t event,
+                                 esp_ble_gatts_cb_param_t *param) {
   // The response that we're going to send of the read event
   esp_gatt_rsp_t rsp;
   // Set the response to all zero to initialize it
@@ -142,7 +158,8 @@ static void capabilities_char_cb(esp_ble_gatts_cb_param_t *param) {
 }
 
 // Handle current state characteristics read event
-static void current_state_char_cb(esp_ble_gatts_cb_param_t *param) {
+static void current_state_char_cb(esp_gatts_cb_event_t event,
+                                  esp_ble_gatts_cb_param_t *param) {
   // The response that we're going to send of the read event
   esp_gatt_rsp_t rsp;
   // Set the response to all zero to initialize it
@@ -160,7 +177,8 @@ static void current_state_char_cb(esp_ble_gatts_cb_param_t *param) {
 }
 
 // Handle current error state characteristics read event
-static void error_state_char_cb(esp_ble_gatts_cb_param_t *param) {
+static void error_state_char_cb(esp_gatts_cb_event_t event,
+                                esp_ble_gatts_cb_param_t *param) {
   // The response that we're going to send of the read event
   esp_gatt_rsp_t rsp;
   // Set the response to all zero to initialize it
@@ -178,15 +196,125 @@ static void error_state_char_cb(esp_ble_gatts_cb_param_t *param) {
 }
 
 // Handle RPC command write event
-static void rpc_command_char_cb(esp_ble_gatts_cb_param_t *param) {
-  // TODO: handle short and long write event
+static void rpc_command_char_cb(esp_gatts_cb_event_t event,
+                                esp_ble_gatts_cb_param_t *param) {
+  esp_gatt_status_t status = ESP_GATT_OK;
 
-  esp_ble_gatts_send_response(improv_gatts_data.gatts_if, param->read.conn_id,
-                              param->read.trans_id, ESP_GATT_OK, NULL);
+  switch (event) {
+  case ESP_GATTS_WRITE_EVT: {
+    ESP_LOGI(NEAR_TAG, "RPC_COMMAND, value len %d, value :", param->write.len);
+    ESP_LOG_BUFFER_HEX(NEAR_TAG, param->write.value, param->write.len);
+    if (param->write.need_rsp) {
+      // Handle write (non-long) under >23 bytes
+      if (!param->write.is_prep) {
+        // TODO: handle rpc call
+
+        esp_ble_gatts_send_response(improv_gatts_data.gatts_if,
+                                    param->read.conn_id, param->read.trans_id,
+                                    status, NULL);
+      }
+      // Handle long prep that requires multiple packets
+      else {
+        // Check if the write offset is bigger than the maximum buffer length
+        if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
+          status = ESP_GATT_INVALID_OFFSET;
+        } else if ((param->write.offset + param->write.len) >
+                   PREPARE_BUF_MAX_SIZE) {
+          status = ESP_GATT_INVALID_ATTR_LEN;
+        }
+        // Initialize the buffer if it has not been used before
+        if (status == ESP_GATT_OK &&
+            rpc_prepare_write_env.prepare_buf == NULL) {
+          rpc_prepare_write_env.prepare_buf =
+              (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE * sizeof(uint8_t));
+          rpc_prepare_write_env.prepare_len = 0;
+
+          // If the buffer is NULL, the malloc have failed, could means there's
+          // no more resource in memory
+          if (rpc_prepare_write_env.prepare_buf == NULL) {
+            ESP_LOGE(NEAR_TAG, "Gatt server prep no mem");
+            status = ESP_GATT_NO_RESOURCES;
+          }
+        }
+
+        // Create temporary response response, each time the long write prep
+        // packets arrived, it needs to repond with an ack
+        esp_gatt_rsp_t *gatt_rsp =
+            (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
+        if (gatt_rsp) {
+          gatt_rsp->attr_value.len = param->write.len;
+          gatt_rsp->attr_value.handle = param->write.handle;
+          gatt_rsp->attr_value.offset = param->write.offset;
+          gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+
+          memcpy(gatt_rsp->attr_value.value, param->write.value,
+                 param->write.len);
+          esp_err_t response_status = esp_ble_gatts_send_response(
+              improv_gatts_data.gatts_if, param->write.conn_id,
+              param->write.conn_id, status, gatt_rsp);
+
+          if (response_status != ESP_OK) {
+            ESP_LOGE(NEAR_TAG, "Send long write response failed\n");
+          }
+          free(gatt_rsp);
+        } else {
+          ESP_LOGE(NEAR_TAG,
+                   "malloc failed, no resource to send response error\n");
+          status = ESP_GATT_NO_RESOURCES;
+        }
+
+        // Ignore writing to buffer if the process status is not OK
+        if (status != ESP_GATT_OK) {
+          return;
+        }
+
+        // Copy the value using the offset provided
+        memcpy(rpc_prepare_write_env.prepare_buf + param->write.offset,
+               param->write.value, param->write.len);
+        // Add the offset to the buffer to know the total length
+        rpc_prepare_write_env.prepare_len += param->write.len;
+      }
+    }
+
+    break;
+  }
+
+  case ESP_GATTS_EXEC_WRITE_EVT: {
+    // Write exec could result in two different confirmation, either confirm or
+    // cancel it
+    //
+    // This will handle the confirmation by executing the RPC
+    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC) {
+      ESP_LOG_BUFFER_HEX(NEAR_TAG, rpc_prepare_write_env.prepare_buf,
+                         rpc_prepare_write_env.prepare_len);
+
+      // TODO: handle rpc call
+    } else {
+      // This handle the cancellation of the prep write (long write)
+      ESP_LOGI(NEAR_TAG, "ESP_GATT_PREP_WRITE_CANCEL");
+    }
+
+    // If the buffer is not empty, free up the buffer for the next call
+    if (rpc_prepare_write_env.prepare_buf) {
+      free(rpc_prepare_write_env.prepare_buf);
+      rpc_prepare_write_env.prepare_buf = NULL;
+    }
+
+    // Reset the buffer lenght to zero
+    rpc_prepare_write_env.prepare_len = 0;
+
+    // TODO: handle rpc call
+    break;
+  }
+
+  default:
+    break;
+  }
 }
 
 // Handle rpc result state characteristics read event
-static void rpc_result_char_cb(esp_ble_gatts_cb_param_t *param) {
+static void rpc_result_char_cb(esp_gatts_cb_event_t event,
+                               esp_ble_gatts_cb_param_t *param) {
   // TODO: handle actual rpc result
 
   // The response that we're going to send of the read event
@@ -457,11 +585,12 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     for (int i = 0; i < IMPROV_WIFI_CHAR_LEN; i++) {
       if (param->read.handle == improv_gatts_char_data[i].char_handle &&
           improv_gatts_char_data[i].property & ESP_GATT_CHAR_PROP_BIT_READ) {
-        improv_gatts_char_data[i].char_cb(param);
+        improv_gatts_char_data[i].char_cb(event, param);
 
         break;
       }
     }
+
     break;
 
   // This event is triggered when the connected GATT client requesting to
@@ -473,6 +602,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
 
     // Handle GATT client activating NOTIFY or INDICATE flags on CCC descriptor,
     // the write request will not be a prep (multi packet write request).
+    // NOTE: might need to check this again later
     if (!param->write.is_prep && param->write.len == 2) {
       ESP_LOGI(NEAR_TAG, "GATT_WRITE_EVT (descr), value len %d, value :",
                param->write.len);
@@ -493,14 +623,35 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
       }
     } else {
       // Search which characteristics for the callback to be called for
-      for (int i = 1; i < IMPROV_WIFI_CHAR_LEN; i++) {
+      for (int i = 0; i < IMPROV_WIFI_CHAR_LEN; i++) {
         // Check which characteristics are being written on, only works with
         // characteristics that got WRITE bit enabled
         if (param->write.handle == improv_gatts_char_data[i].char_handle &&
             improv_gatts_char_data[i].property & ESP_GATT_CHAR_PROP_BIT_WRITE) {
+          improv_gatts_char_data[i].char_cb(event, param);
 
-          improv_gatts_char_data[i].char_cb(param);
+          break;
         }
+      }
+    }
+
+    break;
+
+    // This event is triggered on a long write where at the end of the data, the
+    // client sends a executive write event to execute the write
+  case ESP_GATTS_EXEC_WRITE_EVT:
+    ESP_LOGI(NEAR_TAG, "ESP_GATTS_EXEC_WRITE_EVT");
+
+    esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                param->write.trans_id, ESP_GATT_OK, NULL);
+
+    // Search which characteristics for the callback to be called for
+    for (int i = 0; i < IMPROV_WIFI_CHAR_LEN; i++) {
+      // Check which characteristics are being written on, only works with
+      // characteristics that got WRITE bit enabled
+      if (param->write.handle == improv_gatts_char_data[i].char_handle &&
+          improv_gatts_char_data[i].property & ESP_GATT_CHAR_PROP_BIT_WRITE) {
+        improv_gatts_char_data[i].char_cb(event, param);
 
         break;
       }
