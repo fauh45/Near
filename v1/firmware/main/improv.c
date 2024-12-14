@@ -58,6 +58,9 @@ improv_wifi_rpc_parsed_command parse_improv_data(const uint8_t *data,
       return improv_command;
     }
 
+    improv_command.ssid = (uint8_t *)malloc(ssid_len * sizeof(uint8_t));
+    improv_command.password = (uint8_t *)malloc(pass_len * sizeof(uint8_t));
+
     // NOTE: might not be the best way to do this
     memcpy(improv_command.ssid, data + ssid_start, ssid_len);
     improv_command.ssid_len = ssid_len;

@@ -503,6 +503,9 @@ void handle_rpc(uint16_t conn_id) {
                                 sizeof(improv_wifi_curr_error_state),
                                 &improv_wifi_curr_error_state, false);
 
+    ESP_LOGI(NEAR_TAG, "ssid: %s, pass: %s", parsed_command.ssid,
+             parsed_command.password);
+
     // TODO: handle wifi connection
     break;
   }
@@ -510,6 +513,11 @@ void handle_rpc(uint16_t conn_id) {
   default:
     break;
   }
+
+  if (parsed_command.ssid)
+    free(parsed_command.ssid);
+  if (parsed_command.password)
+    free(parsed_command.password);
 }
 
 static void gatts_event_handler(esp_gatts_cb_event_t event,
