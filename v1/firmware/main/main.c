@@ -123,7 +123,7 @@ static struct gatts_profile_inst improv_gatts_data = {
 };
 
 // Definition for RPC handler after long write event
-void handle_rpc();
+void handle_rpc(uint16_t conn_id);
 
 // Handle capabilities characteristics read event
 static void capabilities_char_cb(esp_gatts_cb_event_t event,
@@ -201,7 +201,7 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
         // Add the whole data length
         rpc_prepare_write_env.prepare_len = param->write.len;
 
-        handle_rpc();
+        handle_rpc(param->write.conn_id);
 
         // Free memory after use
         free(rpc_prepare_write_env.prepare_buf);
@@ -287,7 +287,7 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
       ESP_LOG_BUFFER_HEX(NEAR_TAG, rpc_prepare_write_env.prepare_buf,
                          rpc_prepare_write_env.prepare_len);
 
-      handle_rpc();
+      handle_rpc(param->exec_write.conn_id);
     } else {
       // This handle the cancellation of the prep write (long write)
       ESP_LOGI(NEAR_TAG, "ESP_GATT_PREP_WRITE_CANCEL");
@@ -396,6 +396,12 @@ static struct gatts_char_inst improv_gatts_char_data[IMPROV_WIFI_CHAR_LEN] = {
          .char_cb = rpc_result_char_cb},
 };
 
+#define GATTS_CAPABILITIES_CHAR improv_gatts_char_data[0]
+#define GATTS_STATE_CHAR improv_gatts_char_data[1]
+#define GATTS_ERROR_CHAR improv_gatts_char_data[2]
+#define GATTS_RPC_CHAR improv_gatts_char_data[3]
+#define GATTS_RPC_RESULT_CHAR improv_gatts_char_data[4]
+
 // GATT advertising data, sent to all the surrounding client
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
@@ -463,15 +469,16 @@ void gatts_add_curr_char_idx() {
 //
 // All the data are currently taken from the global context, might not be the
 // best to do later, but for a quick and dirty implementation should be fine.
-void handle_rpc() {
+void handle_rpc(uint16_t conn_id) {
   improv_wifi_rpc_parsed_command parsed_command = parse_improv_data(
       rpc_prepare_write_env.prepare_buf, rpc_prepare_write_env.prepare_len);
 
   if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
     improv_wifi_curr_error_state = parsed_command.error;
-
-    // TODO: handle notify
-
+    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                                GATTS_ERROR_CHAR.char_handle,
+                                sizeof(improv_wifi_curr_error_state),
+                                &improv_wifi_curr_error_state, false);
     return;
   }
 
@@ -484,7 +491,10 @@ void handle_rpc() {
   case IMPROV_CMD_WIFI_SETTINGS: {
     // Remove previously added error
     improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
-    // TODO: handle notify
+    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                                GATTS_ERROR_CHAR.char_handle,
+                                sizeof(improv_wifi_curr_error_state),
+                                &improv_wifi_curr_error_state, false);
 
     // TODO: handle wifi connection
     break;
