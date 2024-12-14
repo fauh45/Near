@@ -1,7 +1,9 @@
 #include "esp_bt.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -12,6 +14,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+
+#include "esp_wifi.h"
+
+#include "lwip/err.h"
+#include "lwip/sys.h"
 
 #include "esp_bt_defs.h"
 #include "esp_bt_device.h"
@@ -802,6 +809,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 void app_main(void) {
   printf("Hello world!\n");
 
+  // TODO: add FreeRTOS event group for WiFi flags
+
   // Temporary variable to see the error response of the function
   esp_err_t res;
 
@@ -821,6 +830,8 @@ void app_main(void) {
     res = nvs_flash_init();
   }
   ESP_ERROR_CHECK(res);
+
+  /* Start BT Initialization */
 
   // Clear up controller data used by Classic Bluetooth controller, as we will
   // only use BLE.
@@ -884,6 +895,20 @@ void app_main(void) {
     return;
   }
 
+  /* Start WiFi Initialization */
+
+  ESP_ERROR_CHECK(esp_netif_init());
+
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  esp_netif_create_default_wifi_sta();
+
+  wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+
+  // TODO: handle wifi event handler initialization
+
+  /* Start BT GAP App registeration */
+
   res = esp_ble_gatts_app_register(IMPROV_APP_ID);
   if (res) {
     ESP_LOGE(NEAR_TAG, "%s gatt app register error: %s", __func__,
@@ -899,6 +924,8 @@ void app_main(void) {
 
     return;
   }
+
+  // TODO: handle ws2812b signaling and tasking
 
   // TODO: set security, etc
   // https://github.com/espressif/esp-idf/blob/v5.3.1/examples/bluetooth/bluedroid/ble/gatt_server_service_table/tutorial/Gatt_Server_Service_Table_Example_Walkthrough.md
