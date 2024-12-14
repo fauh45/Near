@@ -21,6 +21,8 @@
 #include "esp_gatt_defs.h"
 #include "esp_gatts_api.h"
 
+#include "improv.h"
+
 #include "sdkconfig.h"
 
 #define NEAR_TAG "Near"
@@ -34,27 +36,6 @@
 #define IMPROV_WIFI_CHAR_LEN 5
 
 #define IMPROV_WIFI_GATTS_HANDLE_LEN 20
-
-// Improv WiFi state flags, this explains the current statet the device is in
-typedef enum {
-  // Awaiting auth through physical interraction
-  AUTH_REQUIRED = 0x01,
-  // Ready to accept credentials
-  AUTHORIZED = 0x02,
-  // Credentials have been received, attempting to connect
-  PROVISIONING = 0x03,
-  // Connection is successful
-  PROVISIONED = 0x04
-} improv_wifi_state;
-
-typedef enum {
-  NO_ERROR = 0x00,
-  INVALID_RPC_PACKET = 0x01,
-  UKNOWN_RPC_CMD = 0x02,
-  UNABLE_TO_CONN = 0x03,
-  NOT_AUTHORIZED = 0x04,
-  UKNOWN_ERR = 0xFF
-} improv_wifi_error_state;
 
 // Prepare buffer to hold multiple write packets
 typedef struct {
@@ -86,10 +67,13 @@ static uint8_t config_flags = 0;
 // out: "If the device cannot fit all of its advertising data in 31 bytes, it
 // should cycle between advertising data."
 static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
-    AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
+    IMPROV_STATE_AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
+
+#define IMPROV_STATE improv_wifi_service_data[0]
+#define IMPROV_CAPABILITIES improv_wifi_service_data[0]
 
 // Current Improv WiFi error state
-static uint8_t improv_wifi_curr_error_state = NO_ERROR;
+static uint8_t improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
 
 // GATT Profile representation, contains the identification, connection, etc
 struct gatts_profile_inst {
@@ -138,6 +122,9 @@ static struct gatts_profile_inst improv_gatts_data = {
                                                     0x68, 0x77, 0x46, 0x00}}}},
 };
 
+// Definition for RPC handler after long write event
+void handle_rpc();
+
 // Handle capabilities characteristics read event
 static void capabilities_char_cb(esp_gatts_cb_event_t event,
                                  esp_ble_gatts_cb_param_t *param) {
@@ -148,7 +135,7 @@ static void capabilities_char_cb(esp_gatts_cb_event_t event,
 
   rsp.handle = param->read.handle;
   rsp.attr_value.len = 1;
-  rsp.attr_value.value[0] = improv_wifi_service_data[1];
+  rsp.attr_value.value[0] = IMPROV_CAPABILITIES;
 
   // Respond to the read request
   //
@@ -167,7 +154,7 @@ static void current_state_char_cb(esp_gatts_cb_event_t event,
 
   rsp.handle = param->read.handle;
   rsp.attr_value.len = 1;
-  rsp.attr_value.value[0] = improv_wifi_service_data[0];
+  rsp.attr_value.value[0] = IMPROV_STATE;
 
   // Respond to the read request
   //
@@ -204,10 +191,22 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
   case ESP_GATTS_WRITE_EVT: {
     ESP_LOGI(NEAR_TAG, "RPC_COMMAND, value len %d, value :", param->write.len);
     ESP_LOG_BUFFER_HEX(NEAR_TAG, param->write.value, param->write.len);
+
     if (param->write.need_rsp) {
       // Handle write (non-long) under >23 bytes
       if (!param->write.is_prep) {
-        // TODO: handle rpc call
+        // Copy the while value to buffer for RPC preparation
+        memcpy(rpc_prepare_write_env.prepare_buf, param->write.value,
+               param->write.len);
+        // Add the whole data length
+        rpc_prepare_write_env.prepare_len = param->write.len;
+
+        handle_rpc();
+
+        // Free memory after use
+        free(rpc_prepare_write_env.prepare_buf);
+        rpc_prepare_write_env.prepare_buf = NULL;
+        rpc_prepare_write_env.prepare_len = 0;
 
         esp_ble_gatts_send_response(improv_gatts_data.gatts_if,
                                     param->read.conn_id, param->read.trans_id,
@@ -288,7 +287,7 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
       ESP_LOG_BUFFER_HEX(NEAR_TAG, rpc_prepare_write_env.prepare_buf,
                          rpc_prepare_write_env.prepare_len);
 
-      // TODO: handle rpc call
+      handle_rpc();
     } else {
       // This handle the cancellation of the prep write (long write)
       ESP_LOGI(NEAR_TAG, "ESP_GATT_PREP_WRITE_CANCEL");
@@ -303,7 +302,6 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
     // Reset the buffer lenght to zero
     rpc_prepare_write_env.prepare_len = 0;
 
-    // TODO: handle rpc call
     break;
   }
 
@@ -458,6 +456,42 @@ void gatts_add_curr_char_idx() {
         improv_gatts_char_data[gatts_add_char_init_idx].property,
         // TODO: learn what to put here? seems to be optional?
         NULL, NULL);
+  }
+}
+
+// Handle the Improv WiFi rpc command, and do the action required
+//
+// All the data are currently taken from the global context, might not be the
+// best to do later, but for a quick and dirty implementation should be fine.
+void handle_rpc() {
+  improv_wifi_rpc_parsed_command parsed_command = parse_improv_data(
+      rpc_prepare_write_env.prepare_buf, rpc_prepare_write_env.prepare_len);
+
+  if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
+    improv_wifi_curr_error_state = parsed_command.error;
+
+    // TODO: handle notify
+
+    return;
+  }
+
+  switch (parsed_command.command) {
+  case IMPROV_CMD_IDENTIFY: {
+    // NOTE: not currently implemented
+    break;
+  }
+
+  case IMPROV_CMD_WIFI_SETTINGS: {
+    // Remove previously added error
+    improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
+    // TODO: handle notify
+
+    // TODO: handle wifi connection
+    break;
+  }
+
+  default:
+    break;
   }
 }
 
@@ -681,8 +715,6 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     // pushed the button?
     esp_ble_gap_start_advertising(&adv_params);
     break;
-
-    // TODO: handle the rest of gatt event
 
   default:
     break;
