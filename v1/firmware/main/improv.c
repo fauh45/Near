@@ -1,4 +1,5 @@
 #include "improv.h"
+#include "esp_log.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -12,6 +13,8 @@ improv_wifi_rpc_parsed_command parse_improv_data(const uint8_t *data,
   // NOTE: current BLE spec for Improv wifi RPC command id only covers 0x01 -
   // 0x02. Change this a newer version of the spec is implemented.
   if (command_type < 0x01 || command_type > 0x02) {
+    ESP_LOGE(IMPROV_SDK_TAG, "Command not valid!");
+
     improv_command.error = IMPROV_ERR_UKNOWN_RPC_CMD;
 
     return improv_command;
@@ -44,17 +47,24 @@ improv_wifi_rpc_parsed_command parse_improv_data(const uint8_t *data,
     uint8_t ssid_start = 3;
     size_t ssid_end = ssid_start + ssid_len;
 
+    ESP_LOGI(IMPROV_SDK_TAG,
+             "ssid_len: %d, ssid_start: %d, ssid_end: %d, len: %d", ssid_len,
+             ssid_start, ssid_end, len);
+
     if (ssid_end > len) {
-      improv_command.command = IMPROV_ERR_INVALID_RPC_PACKET;
+      improv_command.error = IMPROV_ERR_INVALID_RPC_PACKET;
       return improv_command;
     }
 
     uint8_t pass_len = data[ssid_end];
-    uint8_t pass_start = ssid_end + pass_len;
-    size_t pass_end = pass_start + ssid_len;
+    uint8_t pass_start = ssid_end + 1;
+    size_t pass_end = pass_start + pass_len;
+
+    ESP_LOGI(IMPROV_SDK_TAG, "pass_len: %d, pass_start: %d, pass_end: %d",
+             pass_len, pass_start, pass_end);
 
     if (pass_end > len) {
-      improv_command.command = IMPROV_ERR_INVALID_RPC_PACKET;
+      improv_command.error = IMPROV_ERR_INVALID_RPC_PACKET;
       return improv_command;
     }
 

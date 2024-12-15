@@ -199,87 +199,87 @@ static void rpc_command_char_cb(esp_gatts_cb_event_t event,
     ESP_LOGI(NEAR_TAG, "RPC_COMMAND, value len %d, value :", param->write.len);
     ESP_LOG_BUFFER_HEX(NEAR_TAG, param->write.value, param->write.len);
 
-    if (param->write.need_rsp) {
-      // Handle write (non-long) under >23 bytes
-      if (!param->write.is_prep) {
-        // Copy the while value to buffer for RPC preparation
-        memcpy(rpc_prepare_write_env.prepare_buf, param->write.value,
-               param->write.len);
-        // Add the whole data length
-        rpc_prepare_write_env.prepare_len = param->write.len;
+    // Initialize the buffer if it has not been used before
+    if (status == ESP_GATT_OK && rpc_prepare_write_env.prepare_buf == NULL) {
+      rpc_prepare_write_env.prepare_buf =
+          (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE * sizeof(uint8_t));
+      rpc_prepare_write_env.prepare_len = 0;
 
-        handle_rpc(param->write.conn_id);
+      // If the buffer is NULL, the malloc have failed, could means there's
+      // no more resource in memory
+      if (rpc_prepare_write_env.prepare_buf == NULL) {
+        ESP_LOGE(NEAR_TAG, "Gatt server prep no mem");
+        status = ESP_GATT_NO_RESOURCES;
+      }
+    }
 
-        // Free memory after use
-        free(rpc_prepare_write_env.prepare_buf);
-        rpc_prepare_write_env.prepare_buf = NULL;
-        rpc_prepare_write_env.prepare_len = 0;
+    // Handle write (non-long) under >23 bytes
+    if (!param->write.is_prep) {
+      // Copy the while value to buffer for RPC preparation
+      memcpy(rpc_prepare_write_env.prepare_buf, param->write.value,
+             param->write.len);
+      // Add the whole data length
+      rpc_prepare_write_env.prepare_len = param->write.len;
 
+      handle_rpc(param->write.conn_id);
+
+      // Free memory after use
+      free(rpc_prepare_write_env.prepare_buf);
+      rpc_prepare_write_env.prepare_buf = NULL;
+      rpc_prepare_write_env.prepare_len = 0;
+
+      // Short write could need response, but not always
+      if (param->write.need_rsp)
         esp_ble_gatts_send_response(improv_gatts_data.gatts_if,
                                     param->read.conn_id, param->read.trans_id,
                                     status, NULL);
+    }
+    // Handle long prep that requires multiple packets
+    else {
+      // Check if the write offset is bigger than the maximum buffer length
+      if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
+        status = ESP_GATT_INVALID_OFFSET;
+      } else if ((param->write.offset + param->write.len) >
+                 PREPARE_BUF_MAX_SIZE) {
+        status = ESP_GATT_INVALID_ATTR_LEN;
       }
-      // Handle long prep that requires multiple packets
-      else {
-        // Check if the write offset is bigger than the maximum buffer length
-        if (param->write.offset > PREPARE_BUF_MAX_SIZE) {
-          status = ESP_GATT_INVALID_OFFSET;
-        } else if ((param->write.offset + param->write.len) >
-                   PREPARE_BUF_MAX_SIZE) {
-          status = ESP_GATT_INVALID_ATTR_LEN;
+
+      // Create temporary response response, each time the long write prep
+      // packets arrived, it needs to repond with an ack
+      esp_gatt_rsp_t *gatt_rsp =
+          (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
+      if (gatt_rsp) {
+        gatt_rsp->attr_value.len = param->write.len;
+        gatt_rsp->attr_value.handle = param->write.handle;
+        gatt_rsp->attr_value.offset = param->write.offset;
+        gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+
+        memcpy(gatt_rsp->attr_value.value, param->write.value,
+               param->write.len);
+        esp_err_t response_status = esp_ble_gatts_send_response(
+            improv_gatts_data.gatts_if, param->write.conn_id,
+            param->write.conn_id, status, gatt_rsp);
+
+        if (response_status != ESP_OK) {
+          ESP_LOGE(NEAR_TAG, "Send long write response failed\n");
         }
-        // Initialize the buffer if it has not been used before
-        if (status == ESP_GATT_OK &&
-            rpc_prepare_write_env.prepare_buf == NULL) {
-          rpc_prepare_write_env.prepare_buf =
-              (uint8_t *)malloc(PREPARE_BUF_MAX_SIZE * sizeof(uint8_t));
-          rpc_prepare_write_env.prepare_len = 0;
-
-          // If the buffer is NULL, the malloc have failed, could means there's
-          // no more resource in memory
-          if (rpc_prepare_write_env.prepare_buf == NULL) {
-            ESP_LOGE(NEAR_TAG, "Gatt server prep no mem");
-            status = ESP_GATT_NO_RESOURCES;
-          }
-        }
-
-        // Create temporary response response, each time the long write prep
-        // packets arrived, it needs to repond with an ack
-        esp_gatt_rsp_t *gatt_rsp =
-            (esp_gatt_rsp_t *)malloc(sizeof(esp_gatt_rsp_t));
-        if (gatt_rsp) {
-          gatt_rsp->attr_value.len = param->write.len;
-          gatt_rsp->attr_value.handle = param->write.handle;
-          gatt_rsp->attr_value.offset = param->write.offset;
-          gatt_rsp->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
-
-          memcpy(gatt_rsp->attr_value.value, param->write.value,
-                 param->write.len);
-          esp_err_t response_status = esp_ble_gatts_send_response(
-              improv_gatts_data.gatts_if, param->write.conn_id,
-              param->write.conn_id, status, gatt_rsp);
-
-          if (response_status != ESP_OK) {
-            ESP_LOGE(NEAR_TAG, "Send long write response failed\n");
-          }
-          free(gatt_rsp);
-        } else {
-          ESP_LOGE(NEAR_TAG,
-                   "malloc failed, no resource to send response error\n");
-          status = ESP_GATT_NO_RESOURCES;
-        }
-
-        // Ignore writing to buffer if the process status is not OK
-        if (status != ESP_GATT_OK) {
-          return;
-        }
-
-        // Copy the value using the offset provided
-        memcpy(rpc_prepare_write_env.prepare_buf + param->write.offset,
-               param->write.value, param->write.len);
-        // Add the offset to the buffer to know the total length
-        rpc_prepare_write_env.prepare_len += param->write.len;
+        free(gatt_rsp);
+      } else {
+        ESP_LOGE(NEAR_TAG,
+                 "malloc failed, no resource to send response error\n");
+        status = ESP_GATT_NO_RESOURCES;
       }
+
+      // Ignore writing to buffer if the process status is not OK
+      if (status != ESP_GATT_OK) {
+        return;
+      }
+
+      // Copy the value using the offset provided
+      memcpy(rpc_prepare_write_env.prepare_buf + param->write.offset,
+             param->write.value, param->write.len);
+      // Add the offset to the buffer to know the total length
+      rpc_prepare_write_env.prepare_len += param->write.len;
     }
 
     break;
@@ -479,6 +479,9 @@ void gatts_add_curr_char_idx() {
 void handle_rpc(uint16_t conn_id) {
   improv_wifi_rpc_parsed_command parsed_command = parse_improv_data(
       rpc_prepare_write_env.prepare_buf, rpc_prepare_write_env.prepare_len);
+
+  ESP_LOGI(NEAR_TAG, "command: %d, error: %d", parsed_command.command,
+           parsed_command.error);
 
   if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
     improv_wifi_curr_error_state = parsed_command.error;

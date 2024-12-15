@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define IMPROV_SDK_TAG "ImprovSDK"
+
 // Improv WiFi state flags, this explains the current statet the device is in
 typedef enum : uint8_t {
   // Awaiting auth through physical interraction
