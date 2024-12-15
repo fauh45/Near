@@ -477,20 +477,11 @@ void gatts_add_curr_char_idx() {
 // All the data are currently taken from the global context, might not be the
 // best to do later, but for a quick and dirty implementation should be fine.
 void handle_rpc(uint16_t conn_id) {
-  improv_wifi_rpc_parsed_command parsed_command = parse_improv_data(
+  const improv_wifi_rpc_parsed_command parsed_command = parse_improv_data(
       rpc_prepare_write_env.prepare_buf, rpc_prepare_write_env.prepare_len);
 
   ESP_LOGI(NEAR_TAG, "command: %d, error: %d", parsed_command.command,
            parsed_command.error);
-
-  if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
-    improv_wifi_curr_error_state = parsed_command.error;
-    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
-                                GATTS_ERROR_CHAR.char_handle,
-                                sizeof(improv_wifi_curr_error_state),
-                                &improv_wifi_curr_error_state, false);
-    return;
-  }
 
   switch (parsed_command.command) {
   case IMPROV_CMD_IDENTIFY: {
@@ -506,10 +497,31 @@ void handle_rpc(uint16_t conn_id) {
                                 sizeof(improv_wifi_curr_error_state),
                                 &improv_wifi_curr_error_state, false);
 
-    ESP_LOGI(NEAR_TAG, "ssid: %s, pass: %s", parsed_command.ssid,
+    IMPROV_STATE = IMPROV_STATE_PROVISIONING;
+    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                                GATTS_STATE_CHAR.char_handle,
+                                sizeof(IMPROV_STATE), &IMPROV_STATE, false);
+
+    if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
+      improv_wifi_curr_error_state = parsed_command.error;
+      esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                                  GATTS_ERROR_CHAR.char_handle,
+                                  sizeof(improv_wifi_curr_error_state),
+                                  &improv_wifi_curr_error_state, false);
+      return;
+    }
+
+    ESP_LOGI(NEAR_TAG, "ssid: %.*s, pass: %.*s", parsed_command.ssid_len,
+             parsed_command.ssid, parsed_command.password_len,
              parsed_command.password);
 
     // TODO: handle wifi connection
+
+    IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                                GATTS_STATE_CHAR.char_handle,
+                                sizeof(IMPROV_STATE), &IMPROV_STATE, false);
+
     break;
   }
 
