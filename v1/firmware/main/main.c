@@ -9,6 +9,7 @@
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
@@ -33,9 +34,12 @@
 
 #include "improv.h"
 
+#include "portmacro.h"
 #include "sdkconfig.h"
 
 #define NEAR_TAG "Near"
+#define WIFI_TAG "WiFi"
+
 #define NEAR_DEVICE_NAME "Near v1"
 
 #define PREPARE_BUF_MAX_SIZE 1024
@@ -489,6 +493,18 @@ void gatts_add_curr_char_idx() {
   }
 }
 
+// Indicate improv error state, both the error characteristics and the state
+// characteristics as well
+void indicate_improv_error(uint16_t conn_id) {
+  esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                              GATTS_STATE_CHAR.char_handle,
+                              sizeof(IMPROV_STATE), &IMPROV_STATE, false);
+  esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
+                              GATTS_ERROR_CHAR.char_handle,
+                              sizeof(improv_wifi_curr_error_state),
+                              &improv_wifi_curr_error_state, false);
+}
+
 // Handle the Improv WiFi rpc command, and do the action required
 //
 // All the data are currently taken from the global context, might not be the
@@ -520,21 +536,78 @@ void handle_rpc(uint16_t conn_id) {
                                 sizeof(IMPROV_STATE), &IMPROV_STATE, false);
 
     if (parsed_command.error != IMPROV_ERR_NO_ERROR) {
+      IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
       improv_wifi_curr_error_state = parsed_command.error;
-      esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
-                                  GATTS_ERROR_CHAR.char_handle,
-                                  sizeof(improv_wifi_curr_error_state),
-                                  &improv_wifi_curr_error_state, false);
+      indicate_improv_error(conn_id);
+
       return;
     }
 
-    ESP_LOGI(NEAR_TAG, "ssid: %.*s, pass: %.*s", parsed_command.ssid_len,
+    ESP_LOGI(WIFI_TAG, "ssid: %.*s, pass: %.*s", parsed_command.ssid_len,
              parsed_command.ssid, parsed_command.password_len,
              parsed_command.password);
 
-    // TODO: handle wifi connection
+    wifi_config_t wifi_config = {.sta = {
+                                     .threshold.authmode = WIFI_AUTH_OPEN,
+                                     .threshold.rssi = -127,
+                                     .scan_method = WIFI_FAST_SCAN,
+                                     .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
+                                 }};
 
-    IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+    // Copy both the SSID and password to the configuration
+    memcpy(wifi_config.sta.ssid, parsed_command.ssid, parsed_command.ssid_len);
+    memcpy(wifi_config.sta.password, parsed_command.password,
+           parsed_command.password_len);
+
+    ESP_LOGI(WIFI_TAG, "wifi_config: ssid: %s, pass: %s", wifi_config.sta.ssid,
+             wifi_config.sta.password);
+
+    esp_err_t config_set_status =
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+
+    // If the configuration failed just return unable to conn
+    if (config_set_status != ESP_OK) {
+      IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+      improv_wifi_curr_error_state = IMPROV_ERR_UNABLE_TO_CONN;
+      indicate_improv_error(conn_id);
+
+      return;
+    }
+
+    esp_err_t start_connect_status = esp_wifi_connect();
+
+    // If somehow the wifi stack is unitialized, or the ssid is invalid, return
+    // unable to conn
+    if (start_connect_status != ESP_OK) {
+      IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+      improv_wifi_curr_error_state = IMPROV_ERR_UNABLE_TO_CONN;
+      indicate_improv_error(conn_id);
+
+      return;
+    }
+
+    ESP_LOGI(WIFI_TAG, "wifi conn started!");
+
+    // Wait until the WiFi connected or some error occured after max retry
+    EventBits_t wifi_status = xEventGroupWaitBits(
+        s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE,
+        pdFALSE, portMAX_DELAY);
+
+    ESP_LOGI(WIFI_TAG, "wifi status after trying to connect %s",
+             wifi_status & WIFI_FAIL_BIT ? "fail!" : "success!");
+
+    if (wifi_status & WIFI_FAIL_BIT) {
+      IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+      improv_wifi_curr_error_state = IMPROV_ERR_UNABLE_TO_CONN;
+      indicate_improv_error(conn_id);
+
+      xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+
+      return;
+    }
+
+    // Success!
+    IMPROV_STATE = IMPROV_STATE_PROVISIONED;
     esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
                                 GATTS_STATE_CHAR.char_handle,
                                 sizeof(IMPROV_STATE), &IMPROV_STATE, false);
@@ -643,7 +716,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     }
 
     // NOTE: maybe we should add some descriptor here? might be one way the
-    // client able to tell GATTTS server of when to enable or disable
+    // client able to tell GATTS server when to enable or disable
     // notification
     break;
 
@@ -876,7 +949,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     // If the state is PROVISIONED then just keep the WiFi to reconnect
     // Or if it's not PROVISIONED and under the retry count
     if (IMPROV_STATE == IMPROV_STATE_PROVISIONED ||
-        wifi_retry_num <= MAX_WIFI_RETRY) {
+        wifi_retry_num < MAX_WIFI_RETRY) {
+
+      ESP_LOGI(WIFI_TAG, "WiFi trying to reconnect! current retry count %d",
+               wifi_retry_num);
+
       esp_wifi_connect();
 
       // NOTE: on certain case when the WiFi has been provisioned, and cannot
@@ -886,7 +963,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     // If the state is not PROVISIONED and is already tried more than the max
     // retry assume that the configuration is not valid, and assume it's an
     // error
-    else if (wifi_retry_num > MAX_WIFI_RETRY) {
+    else {
       xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
     }
   }
@@ -995,6 +1072,8 @@ void app_main(void) {
   // Event Loop Handler for WiFi related events
   esp_event_handler_instance_t wifi_event_handler_inst;
   esp_event_handler_instance_t ip_event_handler_inst;
+
+  // TODO: handle if there's already something on the NVS
 
   // Register the WiFi event handler for the required events
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
