@@ -1,9 +1,12 @@
 #include "esp_bt.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_event_base.h"
 #include "esp_log.h"
+#include "esp_netif_types.h"
 #include "esp_system.h"
 #include "esp_wifi_default.h"
+#include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -44,6 +47,20 @@
 
 #define IMPROV_WIFI_GATTS_HANDLE_LEN 20
 
+#define MAX_WIFI_RETRY 3
+
+// FreeRTOS event group to signal when WiFi are connected
+static EventGroupHandle_t s_wifi_event_group;
+
+// Bits for FreeRTOS event group for the WiFi
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+
+// Counter to check how many times the WiFi tried to connect but failed
+// This variable is only used if the IMPROV_STATE is not equal to PROVISIONED
+// otherwise, the device will keep on trying to connect
+static int wifi_retry_num = 0;
+
 // Prepare buffer to hold multiple write packets
 typedef struct {
   // Buffer data
@@ -77,7 +94,7 @@ static uint8_t improv_wifi_service_data[IMPROV_WIFI_SERVICE_DATA_LEN] = {
     IMPROV_STATE_AUTHORIZED, 0x0, 0x0, 0x0, 0x0, 0x0};
 
 #define IMPROV_STATE improv_wifi_service_data[0]
-#define IMPROV_CAPABILITIES improv_wifi_service_data[0]
+#define IMPROV_CAPABILITIES improv_wifi_service_data[1]
 
 // Current Improv WiFi error state
 static uint8_t improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
@@ -829,10 +846,57 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
   }
 }
 
+// WiFi event loop handler.
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data) {
+  // This event will triggered when the WiFi have successfully connected, and
+  // have received the IP address from DHCP. This event is used instead of
+  // WIFI_EVENT_STA_CONNECTED to make sure that the device can reach the
+  // internet already
+  if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    // Set the FreeRTOS event to make whatever waiting for the WiFi connection
+    // to resolve
+    xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+    // Reset the event group and count for WiFi fail
+    xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+    wifi_retry_num = 0;
+
+    // Set the state to PROVISIONED as now the device has successfully connected
+    // to the WiFi
+    IMPROV_STATE = IMPROV_STATE_PROVISIONED;
+  }
+  // This event will be triggered when the WiFi somehow got disconneted
+  else if (event_base == WIFI_EVENT &&
+           event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    // Clear out the bits on the FreeRTOS event as the WiFi is not currently
+    // connected
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+    // If the state is PROVISIONED then just keep the WiFi to reconnect
+    // Or if it's not PROVISIONED and under the retry count
+    if (IMPROV_STATE == IMPROV_STATE_PROVISIONED ||
+        wifi_retry_num <= MAX_WIFI_RETRY) {
+      esp_wifi_connect();
+
+      // NOTE: on certain case when the WiFi has been provisioned, and cannot
+      // connect this could overflow, but well, it doesn't really matter for now
+      wifi_retry_num += 1;
+    }
+    // If the state is not PROVISIONED and is already tried more than the max
+    // retry assume that the configuration is not valid, and assume it's an
+    // error
+    else if (wifi_retry_num > MAX_WIFI_RETRY) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+    }
+  }
+}
+
 void app_main(void) {
   printf("Hello world!\n");
 
-  // TODO: add FreeRTOS event group for WiFi flags
+  // Init FreeRTOS event group for the WiFi events
+  s_wifi_event_group = xEventGroupCreate();
 
   // Temporary variable to see the error response of the function
   esp_err_t res;
@@ -928,7 +992,22 @@ void app_main(void) {
   wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
 
-  // TODO: handle wifi event handler initialization
+  // Event Loop Handler for WiFi related events
+  esp_event_handler_instance_t wifi_event_handler_inst;
+  esp_event_handler_instance_t ip_event_handler_inst;
+
+  // Register the WiFi event handler for the required events
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_event_handler, NULL,
+      &wifi_event_handler_inst));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL,
+      &ip_event_handler_inst));
+
+  // Set the WiFi to station mode to connect to other APs
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+  // Start the WiFi station
+  ESP_ERROR_CHECK(esp_wifi_start());
 
   /* Start BT GAP App registeration */
 
