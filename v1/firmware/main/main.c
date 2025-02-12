@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -608,9 +609,8 @@ void handle_rpc(uint16_t conn_id) {
 
     // Success!
     IMPROV_STATE = IMPROV_STATE_PROVISIONED;
-    esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
-                                GATTS_STATE_CHAR.char_handle,
-                                sizeof(IMPROV_STATE), &IMPROV_STATE, false);
+    improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
+    indicate_improv_error(conn_id);
 
     break;
   }
@@ -934,10 +934,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     // Reset the event group and count for WiFi fail
     xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
     wifi_retry_num = 0;
-
-    // Set the state to PROVISIONED as now the device has successfully connected
-    // to the WiFi
-    IMPROV_STATE = IMPROV_STATE_PROVISIONED;
   }
   // This event will be triggered when the WiFi somehow got disconneted
   else if (event_base == WIFI_EVENT &&
@@ -949,7 +945,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     // If the state is PROVISIONED then just keep the WiFi to reconnect
     // Or if it's not PROVISIONED and under the retry count
     if (IMPROV_STATE == IMPROV_STATE_PROVISIONED ||
-        wifi_retry_num < MAX_WIFI_RETRY) {
+        (IMPROV_STATE == IMPROV_STATE_PROVISIONING &&
+         wifi_retry_num < MAX_WIFI_RETRY)) {
 
       ESP_LOGI(WIFI_TAG, "WiFi trying to reconnect! current retry count %d",
                wifi_retry_num);
@@ -1066,14 +1063,12 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   esp_netif_create_default_wifi_sta();
 
-  wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+  wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_config));
 
   // Event Loop Handler for WiFi related events
   esp_event_handler_instance_t wifi_event_handler_inst;
   esp_event_handler_instance_t ip_event_handler_inst;
-
-  // TODO: handle if there's already something on the NVS
 
   // Register the WiFi event handler for the required events
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -1087,6 +1082,50 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   // Start the WiFi station
   ESP_ERROR_CHECK(esp_wifi_start());
+
+  // Handle WiFi configuration if there's already something on the NVS
+  wifi_config_t wifi_config;
+  res = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
+
+  size_t ssid_len = strlen((char *)wifi_config.sta.ssid);
+
+  ESP_LOGI(WIFI_TAG, "SSID length on the NVS %d", ssid_len);
+
+  // If there's already a wifi configuration, check if at least the SSID is not
+  // empty
+  if (res == ESP_OK && ssid_len != 0) {
+    IMPROV_STATE = IMPROV_STATE_PROVISIONING;
+    res = esp_wifi_connect();
+
+    ESP_LOGI(WIFI_TAG, "Error code for wifi_connect on init %d", res);
+
+    // Ignore if the WiFi connect doesn't work
+    if (res == ESP_OK) {
+      // Wait until the WiFi connected or some error occured after max retry
+      EventBits_t wifi_status = xEventGroupWaitBits(
+          s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE,
+          pdFALSE, portMAX_DELAY);
+
+      ESP_LOGI(WIFI_TAG, "wifi status after trying to connect using nvs %s",
+               wifi_status & WIFI_FAIL_BIT ? "fail!" : "success!");
+
+      // There's some error!
+      if (wifi_status & WIFI_FAIL_BIT) {
+        IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+        improv_wifi_curr_error_state = IMPROV_ERR_UNABLE_TO_CONN;
+
+        xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+      } else {
+        // Success!
+        IMPROV_STATE = IMPROV_STATE_PROVISIONED;
+        improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
+      }
+    }
+    // If somehow the esp_wifi_connect fails, set it back to authorized mode
+    else {
+      IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+    }
+  }
 
   /* Start BT GAP App registeration */
 
