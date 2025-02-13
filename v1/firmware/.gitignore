@@ -5,3 +5,6 @@
 .cache
 build/*
 *.old
+
+# sdkconfig only going to be used for local configuration
+sdkconfig

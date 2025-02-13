@@ -1,0 +1,24 @@
+menu "MQTT Authentication config"
+    config MQTT_HOSTNAME
+        string "MQTT Hostname"
+        default "mqtt://localhost"
+        help
+            "The default sdk config supports MQTT 5.0, using MQTT, MQTT over SSL, WS or WSS. The format for the hostname should be scheme://hostname:port/path. Scheme could any of mqtt, mqtts, ws, or wss."
+
+    config MQTT_USERNAME
+        string "MQTT Username"
+        help
+            "Used to authenticate to the MQTT server"
+
+    config MQTT_PASSWORD
+        string "MQTT Password"
+        help
+            "Password used to authenticate to the MQTT server"
+
+    config MQTT_CLIENT_ID_PREFIX
+        string "Prefix for the MQTT client id"
+        default "NEAR_"
+        help
+            "Prefix used for to indicate the device"
+endmenu
+
