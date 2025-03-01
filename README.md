@@ -23,4 +23,4 @@ a small (25 x 28mm) PCB board. All of it mounted on a SMD mounting.
 
 ## Credits
 
-H❤️F Engineering, 2024.
+H❤️F Engineering, 2025.
