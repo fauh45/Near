@@ -3,45 +3,49 @@
 #include "esp_event.h"
 #include "esp_event_base.h"
 #include "esp_log.h"
-#include "esp_netif_types.h"
-#include "esp_system.h"
-#include "esp_wifi_default.h"
-#include "esp_wifi_types.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
-#include "freertos/projdefs.h"
-#include "freertos/task.h"
-#include "nvs_flash.h"
+
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/_types.h>
 #include <sys/types.h>
 
-#include "esp_wifi.h"
+#include "nvs_flash.h"
 
-#include "lwip/err.h"
-#include "lwip/sys.h"
+#include "freertos/event_groups.h"
+#include "freertos/projdefs.h"
+#include "freertos/task.h"
 
 #include "esp_bt_defs.h"
-#include "esp_bt_device.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
 #include "esp_gatt_defs.h"
 #include "esp_gatts_api.h"
 
-#include "improv.h"
+#include "esp_netif_types.h"
+#include "esp_wifi.h"
+#include "esp_wifi_default.h"
+#include "esp_wifi_types.h"
+
+#include "mqtt_client.h"
 
 #include "portmacro.h"
+
+#include "improv.h"
 #include "sdkconfig.h"
 
 #define NEAR_TAG "Near"
 #define WIFI_TAG "WiFi"
+#define MQTT_TAG "Mqtt"
 
 #define NEAR_DEVICE_NAME "Near v1"
+
+#define NEAR_V1_MQTT_BROADCAST_TOPIC "/near/v1/broadcast/#"
+#define NEAR_V1_MQTT_BROADCAST_QOS 0
 
 #define PREPARE_BUF_MAX_SIZE 1024
 
@@ -54,12 +58,19 @@
 
 #define MAX_WIFI_RETRY 3
 
+// Included mqtt host PEM for host verification
+extern const uint8_t mqtt_host_pem_start[] asm("_binary_mqtt_host_pem_start");
+extern const uint8_t mqtt_host_pem_end[] asm("_binary_mqtt_host_pem_end");
+
 // FreeRTOS event group to signal when WiFi are connected
 static EventGroupHandle_t s_wifi_event_group;
 
 // Bits for FreeRTOS event group for the WiFi
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+
+// MQTT client intialized on the start
+static esp_mqtt_client_handle_t mqtt_client;
 
 // Counter to check how many times the WiFi tried to connect but failed
 // This variable is only used if the IMPROV_STATE is not equal to PROVISIONED
@@ -607,6 +618,9 @@ void handle_rpc(uint16_t conn_id) {
       return;
     }
 
+    // Start the MQTT client after WiFi connected
+    esp_mqtt_client_start(mqtt_client);
+
     // Success!
     IMPROV_STATE = IMPROV_STATE_PROVISIONED;
     improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
@@ -966,6 +980,42 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
   }
 }
 
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
+                               int32_t event_id, void *event_data) {
+
+  esp_mqtt_event_handle_t event = event_data;
+  esp_mqtt_client_handle_t client = event->client;
+
+  int msg_id;
+
+  switch ((esp_mqtt_event_id_t)event_id) {
+  case MQTT_EVENT_CONNECTED:
+    ESP_LOGI(MQTT_TAG, "MQTT_EVENT_CONNECTED");
+
+    msg_id = esp_mqtt_client_subscribe(client, NEAR_V1_MQTT_BROADCAST_TOPIC,
+                                       NEAR_V1_MQTT_BROADCAST_QOS);
+    ESP_LOGI(MQTT_TAG, "subscribe to broadcast successful, msg_id=%d", msg_id);
+    break;
+
+  case MQTT_EVENT_DISCONNECTED:
+    ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DISCONNECTED, trying to reconnect...");
+    esp_mqtt_client_reconnect(client);
+    break;
+
+  case MQTT_EVENT_DATA:
+    ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DATA");
+    ESP_LOGI(MQTT_TAG, "TOPIC=%.*s\r\n", event->topic_len, event->topic);
+    ESP_LOGI(MQTT_TAG, "DATA=%.*s\r\n", event->data_len, event->data);
+
+    // TODO: light up them LED!
+
+    break;
+
+  default:
+    break;
+  }
+}
+
 void app_main(void) {
   printf("Hello world!\n");
 
@@ -1087,6 +1137,18 @@ void app_main(void) {
   wifi_config_t wifi_config;
   res = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
 
+  /* Start MQTT Initialization */
+
+  const esp_mqtt_client_config_t mqtt_cfg = {
+      .broker.address.uri = CONFIG_MQTT_HOSTNAME,
+      .broker.verification.certificate = (const char *)mqtt_host_pem_start
+      // TODO: add the chip id with custom prefix
+  };
+  mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+  esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID,
+                                 mqtt_event_handler, NULL);
+
+  /* Start WiFi NVS reconnection strategy */
   size_t ssid_len = strlen((char *)wifi_config.sta.ssid);
 
   ESP_LOGI(WIFI_TAG, "SSID length on the NVS %d", ssid_len);
@@ -1119,6 +1181,8 @@ void app_main(void) {
         // Success!
         IMPROV_STATE = IMPROV_STATE_PROVISIONED;
         improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
+
+        esp_mqtt_client_start(mqtt_client);
       }
     }
     // If somehow the esp_wifi_connect fails, set it back to authorized mode
