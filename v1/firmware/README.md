@@ -18,13 +18,18 @@ Device <-> MQTT <-> Other Device
 
 To make sure that each device only connected to the network they want, they could just append their network id on the event name.
 
-## Progress
+## Progress for Beta
 
-- [ ] Implement Improv WiFi through BLE
+- [x] Implement Improv WiFi through BLE
   - [x] Setup GAP & GATT broadcast
-  - [ ] Setup RPC to handle WiFi connection
-  - [ ] Add custom RPC to setup network id
+  - [x] Setup RPC to handle WiFi connection
+  - [x] Add custom RPC to setup network id
 - [ ] Setup MQTT connection
-  - [ ] Handle connection to the server
+  - [x] Handle connection to the server
   - [ ] Handle button press to send event
   - [ ] Handle LED on event listen
+
+## Progress for v1
+
+- [ ] Setup reset system
+- [ ] Other improvement we could find on beta?

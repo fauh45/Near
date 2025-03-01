@@ -20,6 +20,7 @@ a small (25 x 28mm) PCB board. All of it mounted on a SMD mounting.
 ### Timeline
 
 - 27 November 2024, finalized the design, and start the PCB and parts order
+- 1 March 2025, two device have been built, firmware nearing beta phase
 
 ## Credits
 
