@@ -24,10 +24,11 @@ To make sure that each device only connected to the network they want, they coul
   - [x] Setup GAP & GATT broadcast
   - [x] Setup RPC to handle WiFi connection
   - [x] Add custom RPC to setup network id
-- [ ] Setup MQTT connection
+- [x] Setup MQTT connection
   - [x] Handle connection to the server
-  - [ ] Handle button press to send event
-  - [ ] Handle LED on event listen
+  - [x] Handle button press to send event
+  - [x] Handle LED on event listen
+- [ ] Fix RMT issue for LED driver not being accurate
 
 ## Progress for v1
 
