@@ -13,6 +13,8 @@
 #include <sys/_types.h>
 #include <sys/types.h>
 
+#include "freertos/FreeRTOSConfig_arch.h"
+#include "freertos/idf_additions.h"
 #include "nvs_flash.h"
 
 #include "freertos/event_groups.h"
@@ -36,6 +38,8 @@
 #include "portmacro.h"
 
 #include "improv.h"
+#include "ws2812_control.h"
+
 #include "sdkconfig.h"
 
 #define NEAR_TAG "Near"
@@ -1016,6 +1020,33 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   }
 }
 
+/**
+ * For now it's still handling really simple lighting task, but soon it should
+ * be able to handle a more complex tasks
+ */
+static void led_light_task() {
+  ws2812_control_init();
+
+  u_int8_t current_led = 0;
+
+  // Main task loop to handle the different type of LED lightings
+  for (;;) {
+    struct led_state current_state;
+
+    for (u_int8_t idx = 0; idx < NUM_LEDS; idx++) {
+      if (idx == current_led)
+        current_state.leds[idx] = 0xFF0000;
+      else
+        current_state.leds[idx] = 0x000000;
+    }
+
+    ws2812_write_leds(current_state);
+    current_led = (current_led + 1) % NUM_LEDS;
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+
 void app_main(void) {
   printf("Hello world!\n");
 
@@ -1147,6 +1178,10 @@ void app_main(void) {
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
   esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID,
                                  mqtt_event_handler, NULL);
+
+  /* Start the LED task */
+  xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
+              2, NULL);
 
   /* Start WiFi NVS reconnection strategy */
   size_t ssid_len = strlen((char *)wifi_config.sta.ssid);
