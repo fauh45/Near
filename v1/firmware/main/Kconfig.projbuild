@@ -6,3 +6,8 @@ menu "MQTT Authentication config"
             "The default sdk config supports MQTT 5.0, using MQTT, MQTT over SSL, WS or WSS. The format for the hostname should be scheme://username:password@hostname:port/path. Scheme could any of mqtt, mqtts, ws, or wss."
 endmenu
 
+menu "Near Config"
+    config NEAR_COLOUR
+        hex "GRB Hex Colour the device will send"
+        default "0x161F18"
+endmenu
