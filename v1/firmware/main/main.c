@@ -10,11 +10,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/_intsup.h>
 #include <sys/_types.h>
 #include <sys/types.h>
 
 #include "freertos/FreeRTOSConfig_arch.h"
 #include "freertos/idf_additions.h"
+#include "mbedtls/base64.h"
 #include "nvs_flash.h"
 
 #include "freertos/event_groups.h"
@@ -37,7 +39,12 @@
 
 #include "portmacro.h"
 
+#include "button_gpio.h"
+#include "button_types.h"
+#include "iot_button.h"
+
 #include "improv.h"
+
 #include "ws2812_control.h"
 
 #include "sdkconfig.h"
@@ -49,6 +56,7 @@
 #define NEAR_DEVICE_NAME "Near v1"
 
 #define NEAR_V1_MQTT_BROADCAST_TOPIC "/near/v1/broadcast/#"
+#define NEAR_V1_MQTT_PUBLISH_BROADCAST_TOPIC "/near/v1/broadcast/click"
 #define NEAR_V1_MQTT_BROADCAST_QOS 0
 
 #define PREPARE_BUF_MAX_SIZE 1024
@@ -79,6 +87,9 @@ static esp_mqtt_client_handle_t mqtt_client;
 // Multipurpose LED state management, used differently for different function
 // Set to 0 if state changed!
 u_int8_t current_led_state = 0;
+// Temporary message store for LED handler
+char *temp_message = NULL;
+size_t temp_message_len = 0;
 
 // Counter to check how many times the WiFi tried to connect but failed
 // This variable is only used if the IMPROV_STATE is not equal to PROVISIONED
@@ -1016,13 +1027,69 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     ESP_LOGI(MQTT_TAG, "TOPIC=%.*s\r\n", event->topic_len, event->topic);
     ESP_LOGI(MQTT_TAG, "DATA=%.*s\r\n", event->data_len, event->data);
 
-    // TODO: light up them LED!
+    temp_message = malloc(sizeof(char) * 4);
+    mbedtls_base64_decode((unsigned char *)temp_message, 4, &temp_message_len,
+                          (const unsigned char *)event->data, event->data_len);
+
+    ESP_LOG_BUFFER_HEX("LED", temp_message, temp_message_len);
+
+    // On authorized state, initial led state is 1, 0 is for the first time the
+    // device reached authorized state
+    current_led_state = 1;
 
     break;
 
   default:
     break;
   }
+}
+
+/**
+ * Handle button pressees.
+ *
+ * Currently also where all the data serialization is happening.
+ * The current beta version bytes data structure is as follows.
+ * | type | green | red | blue |
+ *
+ * `type` could be any of:
+ * 0x01 = single click
+ * ...TBD
+ *
+ * Any of the colours (`green`, `red`, `blue`) is the colour representation.
+ * Generally it's better to only send value until 1F as FF will be too bright.
+ */
+static void ack_btn_handler(void *arg, void *data) {
+  button_event_t event = iot_button_get_event(arg);
+  ESP_LOGI("ACK_BTN", "%s", iot_button_get_event_str(event));
+
+  char *new_message = malloc(sizeof(char) * 4);
+
+  switch (event) {
+  case BUTTON_SINGLE_CLICK:
+
+    new_message[0] = 0x01;
+    new_message[1] = (CONFIG_NEAR_COLOUR >> 16) & 0xFF;
+    new_message[2] = (CONFIG_NEAR_COLOUR >> 8) & 0xFF;
+    new_message[3] = CONFIG_NEAR_COLOUR & 0xFF;
+
+    char encoded_payload[32];
+    size_t encoded_payload_len;
+    mbedtls_base64_encode((unsigned char *)encoded_payload,
+                          sizeof(encoded_payload), &encoded_payload_len,
+                          (const unsigned char *)new_message, 4);
+
+    ESP_LOGI(MQTT_TAG, "ENCODED=%.*s\r\n", encoded_payload_len,
+             encoded_payload);
+
+    esp_mqtt_client_publish(mqtt_client, NEAR_V1_MQTT_PUBLISH_BROADCAST_TOPIC,
+                            encoded_payload, 0, NEAR_V1_MQTT_BROADCAST_QOS, 0);
+    break;
+
+  default:
+    break;
+  }
+
+  free(new_message);
 }
 
 /**
@@ -1068,7 +1135,7 @@ static void led_light_task() {
 
       current_led_state++;
 
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(2000));
 
       break;
 
@@ -1085,12 +1152,19 @@ static void led_light_task() {
 
       current_led_state = (current_led_state + 1) % NUM_LEDS;
 
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(2000));
       break;
 
     case IMPROV_STATE_PROVISIONED:
       // Blink green to let user know that the device successfully connected
       if (current_led_state == 0) {
+        current_state.leds[0] = 0x000000;
+        current_state.leds[1] = 0x000000;
+        current_state.leds[2] = 0x000000;
+        current_state.leds[3] = 0x000000;
+
+        ws2812_write_leds(current_state);
+
         current_state.leds[0] = 0x0F0000;
         current_state.leds[1] = 0x000000;
         current_state.leds[2] = 0x0F0000;
@@ -1117,11 +1191,62 @@ static void led_light_task() {
 
         ws2812_write_leds(current_state);
 
-        current_led_state++;
+        current_led_state = 0xFF;
       }
 
-      // TODO: handle MQTT data
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      if (current_led_state == 0xFF) {
+        // Reset all the leds to off (standby)
+        current_state.leds[0] = 0x000000;
+        current_state.leds[1] = 0x000000;
+        current_state.leds[2] = 0x000000;
+        current_state.leds[3] = 0x000000;
+
+        ws2812_write_leds(current_state);
+
+        vTaskDelay(pdMS_TO_TICKS(2500));
+
+        continue;
+      }
+
+      uint32_t sent_colour = 0;
+      sent_colour |= temp_message[3];
+      sent_colour |= temp_message[2] << 8;
+      sent_colour |= temp_message[1] << 16;
+
+      if (temp_message[0] == 0x01) {
+        // If the flash done 3 times already, set done (0xFF)
+        if (current_led_state > 4) {
+          current_led_state = 0xFF;
+          free(temp_message);
+          temp_message_len = 0;
+
+          continue;
+        }
+
+        // Odd/Even switch on and off
+        if (current_led_state & 1) {
+          current_state.leds[0] = sent_colour;
+          current_state.leds[1] = sent_colour;
+          current_state.leds[2] = sent_colour;
+          current_state.leds[3] = sent_colour;
+        } else {
+          current_state.leds[0] = 0x000000;
+          current_state.leds[1] = 0x000000;
+          current_state.leds[2] = 0x000000;
+          current_state.leds[3] = 0x000000;
+        }
+
+        ws2812_write_leds(current_state);
+
+        current_led_state++;
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+      }
+      // TODO: add more light show type!
+      else {
+        current_led_state = 0xFF;
+      }
+
       break;
 
     default:
@@ -1157,10 +1282,21 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(res);
 
+  /* Start button initialization */
+  button_config_t ack_btn_config = {0};
+  button_gpio_config_t ack_btn_gpio_config = {.gpio_num = 10,
+                                              .active_level = 0};
+  button_handle_t ack_btn_handler_inst;
+  ESP_ERROR_CHECK(iot_button_new_gpio_device(
+      &ack_btn_config, &ack_btn_gpio_config, &ack_btn_handler_inst));
+  // TODO: add more button events here
+  iot_button_register_cb(ack_btn_handler_inst, BUTTON_SINGLE_CLICK, NULL,
+                         ack_btn_handler, NULL);
+
   /* Start BT Initialization */
 
-  // Clear up controller data used by Classic Bluetooth controller, as we will
-  // only use BLE.
+  // Clear up controller data used by Classic Bluetooth controller, as we
+  // will only use BLE.
   // https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32/api-reference/bluetooth/controller_vhci.html?highlight=esp_bt_controller_mem_release#_CPPv429esp_bt_controller_mem_release13esp_bt_mode_t
   ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
@@ -1221,6 +1357,10 @@ void app_main(void) {
     return;
   }
 
+  /* Start the LED task */
+  xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
+              1, NULL);
+
   /* Start WiFi Initialization */
 
   ESP_ERROR_CHECK(esp_netif_init());
@@ -1262,10 +1402,6 @@ void app_main(void) {
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
   esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID,
                                  mqtt_event_handler, NULL);
-
-  /* Start the LED task */
-  xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
-              1, NULL);
 
   /* Start WiFi NVS reconnection strategy */
   size_t ssid_len = strlen((char *)wifi_config.sta.ssid);
@@ -1330,8 +1466,6 @@ void app_main(void) {
 
     return;
   }
-
-  // TODO: handle ws2812b signaling and tasking
 
   // TODO: set security, etc
   // https://github.com/espressif/esp-idf/blob/v5.3.1/examples/bluetooth/bluedroid/ble/gatt_server_service_table/tutorial/Gatt_Server_Service_Table_Example_Walkthrough.md
