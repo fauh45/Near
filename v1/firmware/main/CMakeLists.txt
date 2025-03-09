@@ -1,2 +1,2 @@
-idf_component_register(SRCS "main.c" "improv.c" "ws2812_control.c"
+idf_component_register(SRCS "main.c" "improv.c"
                       INCLUDE_DIRS "")

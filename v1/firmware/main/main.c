@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,7 +17,9 @@
 
 #include "freertos/FreeRTOSConfig_arch.h"
 #include "freertos/idf_additions.h"
-#include "mbedtls/base64.h"
+#include "led_strip.h"
+#include "led_strip_rmt.h"
+#include "led_strip_types.h"
 #include "nvs_flash.h"
 
 #include "freertos/event_groups.h"
@@ -35,6 +38,8 @@
 #include "esp_wifi_default.h"
 #include "esp_wifi_types.h"
 
+#include "mbedtls/base64.h"
+
 #include "mqtt_client.h"
 
 #include "portmacro.h"
@@ -45,9 +50,8 @@
 
 #include "improv.h"
 
-#include "ws2812_control.h"
-
 #include "sdkconfig.h"
+#include "soc/clk_tree_defs.h"
 
 #define NEAR_TAG "Near"
 #define WIFI_TAG "WiFi"
@@ -58,6 +62,8 @@
 #define NEAR_V1_MQTT_BROADCAST_TOPIC "/near/v1/broadcast/#"
 #define NEAR_V1_MQTT_PUBLISH_BROADCAST_TOPIC "/near/v1/broadcast/click"
 #define NEAR_V1_MQTT_BROADCAST_QOS 0
+
+#define LED_NUM 4
 
 #define PREPARE_BUF_MAX_SIZE 1024
 
@@ -87,9 +93,12 @@ static esp_mqtt_client_handle_t mqtt_client;
 // Multipurpose LED state management, used differently for different function
 // Set to 0 if state changed!
 u_int8_t current_led_state = 0;
+
 // Temporary message store for LED handler
 char *temp_message = NULL;
 size_t temp_message_len = 0;
+
+led_strip_handle_t led_strip;
 
 // Counter to check how many times the WiFi tried to connect but failed
 // This variable is only used if the IMPROV_STATE is not equal to PROVISIONED
@@ -1097,12 +1106,8 @@ static void ack_btn_handler(void *arg, void *data) {
  * be able to handle a more complex tasks
  */
 static void led_light_task() {
-  ws2812_control_init();
-
   // Main task loop to handle the different type of LED lightings
   for (;;) {
-    struct led_state current_state;
-
     switch (IMPROV_STATE) {
     case IMPROV_STATE_AUTHORIZED:
       if (current_led_state > 0)
@@ -1112,106 +1117,71 @@ static void led_light_task() {
 
       if (improv_wifi_curr_error_state == IMPROV_ERR_UNABLE_TO_CONN) {
         // Set yellow if the device cannot connect to the WiFi
-        current_state.leds[0] = 0x0F0F00;
-        current_state.leds[1] = 0x0F0F00;
-        current_state.leds[2] = 0x0F0F00;
-        current_state.leds[3] = 0x0F0F00;
+        for (int i = 0; i < LED_NUM; i++) {
+          led_strip_set_pixel(led_strip, i, 0x0F, 0x0F, 0x00);
+        }
       } else if (improv_wifi_curr_error_state != IMPROV_ERR_UNKNOWN_ERR) {
         // Set red if the device cannot connect to the WiFi, and it's not user
         // fixable
-        current_state.leds[0] = 0x0F0000;
-        current_state.leds[1] = 0x0F0000;
-        current_state.leds[2] = 0x0F0000;
-        current_state.leds[3] = 0x0F0000;
+        for (int i = 0; i < LED_NUM; i++) {
+          led_strip_set_pixel(led_strip, i, 0x00, 0x0F, 0x00);
+        }
       } else {
         // Set orange when the user haven't setup the WiFi just yet
-        current_state.leds[0] = 0x070F00;
-        current_state.leds[1] = 0x070F00;
-        current_state.leds[2] = 0x070F00;
-        current_state.leds[3] = 0x070F00;
+        for (int i = 0; i < LED_NUM; i++) {
+          led_strip_set_pixel(led_strip, i, 0x0F, 0x07, 0x00);
+        }
       }
 
-      ws2812_write_leds(current_state);
+      led_strip_refresh(led_strip);
 
       current_led_state++;
 
-      vTaskDelay(pdMS_TO_TICKS(2000));
+      vTaskDelay(pdMS_TO_TICKS(2500));
 
       break;
 
     case IMPROV_STATE_PROVISIONING:
       // Rotate green around the device when the device is connecting to WiFi
-      for (u_int8_t idx = 0; idx < NUM_LEDS; idx++) {
-        if (idx == current_led_state)
-          current_state.leds[idx] = 0x1F0000;
-        else
-          current_state.leds[idx] = 0x000000;
+      for (u_int8_t idx = 0; idx < LED_NUM; idx++) {
+        if (idx == current_led_state) {
+          led_strip_set_pixel(led_strip, idx, 0x00, 0x1F, 0x00);
+        } else
+          led_strip_set_pixel(led_strip, idx, 0x00, 0x00, 0x00);
       }
 
-      ws2812_write_leds(current_state);
+      led_strip_refresh(led_strip);
 
-      current_led_state = (current_led_state + 1) % NUM_LEDS;
+      current_led_state = (current_led_state + 1) % LED_NUM;
 
-      vTaskDelay(pdMS_TO_TICKS(2000));
+      vTaskDelay(pdMS_TO_TICKS(1000));
       break;
 
     case IMPROV_STATE_PROVISIONED:
       // Blink green to let user know that the device successfully connected
       if (current_led_state == 0) {
-        current_state.leds[0] = 0x000000;
-        current_state.leds[1] = 0x000000;
-        current_state.leds[2] = 0x000000;
-        current_state.leds[3] = 0x000000;
 
-        ws2812_write_leds(current_state);
+        for (int i = 0; i < 3; i++) {
+          for (int j = 0; j < LED_NUM; j++) {
+            led_strip_set_pixel(led_strip, j, 0x00,
+                                (j & 1) == (i & 1) ? 0x0F : 0x00, 0x00);
+          }
 
-        current_state.leds[0] = 0x0F0000;
-        current_state.leds[1] = 0x000000;
-        current_state.leds[2] = 0x0F0000;
-        current_state.leds[3] = 0x000000;
+          vTaskDelay(pdMS_TO_TICKS(1000));
+        }
 
-        ws2812_write_leds(current_state);
-
-        vTaskDelay(pdMS_TO_TICKS(700));
-
-        current_state.leds[0] = 0x000000;
-        current_state.leds[1] = 0x0F0000;
-        current_state.leds[2] = 0x000000;
-        current_state.leds[3] = 0x0F0000;
-
-        ws2812_write_leds(current_state);
-
-        vTaskDelay(pdMS_TO_TICKS(700));
-
-        // Reset all the leds to off (standby)
-        current_state.leds[0] = 0x000000;
-        current_state.leds[1] = 0x000000;
-        current_state.leds[2] = 0x000000;
-        current_state.leds[3] = 0x000000;
-
-        ws2812_write_leds(current_state);
+        led_strip_refresh(led_strip);
 
         current_led_state = 0xFF;
       }
 
       if (current_led_state == 0xFF) {
         // Reset all the leds to off (standby)
-        current_state.leds[0] = 0x000000;
-        current_state.leds[1] = 0x000000;
-        current_state.leds[2] = 0x000000;
-        current_state.leds[3] = 0x000000;
-
-        ws2812_write_leds(current_state);
-
-        vTaskDelay(pdMS_TO_TICKS(2500));
+        led_strip_clear(led_strip);
+        vTaskDelay(pdMS_TO_TICKS(5000));
 
         continue;
       }
-
-      uint32_t sent_colour = 0;
-      sent_colour |= temp_message[3];
-      sent_colour |= temp_message[2] << 8;
-      sent_colour |= temp_message[1] << 16;
 
       if (temp_message[0] == 0x01) {
         // If the flash done 3 times already, set done (0xFF)
@@ -1224,19 +1194,15 @@ static void led_light_task() {
         }
 
         // Odd/Even switch on and off
-        if (current_led_state & 1) {
-          current_state.leds[0] = sent_colour;
-          current_state.leds[1] = sent_colour;
-          current_state.leds[2] = sent_colour;
-          current_state.leds[3] = sent_colour;
-        } else {
-          current_state.leds[0] = 0x000000;
-          current_state.leds[1] = 0x000000;
-          current_state.leds[2] = 0x000000;
-          current_state.leds[3] = 0x000000;
+        for (int i = 0; i < LED_NUM; i++) {
+          if (current_led_state & 1)
+            led_strip_set_pixel(led_strip, i, temp_message[2], temp_message[1],
+                                temp_message[3]);
+          else
+            led_strip_set_pixel(led_strip, i, 0x00, 0x00, 0x00);
         }
 
-        ws2812_write_leds(current_state);
+        led_strip_refresh(led_strip);
 
         current_led_state++;
 
@@ -1244,7 +1210,9 @@ static void led_light_task() {
       }
       // TODO: add more light show type!
       else {
-        current_led_state = 0xFF;
+        free(temp_message);
+        temp_message_len = 0;
+        temp_message_len = 0;
       }
 
       break;
@@ -1357,10 +1325,6 @@ void app_main(void) {
     return;
   }
 
-  /* Start the LED task */
-  xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
-              1, NULL);
-
   /* Start WiFi Initialization */
 
   ESP_ERROR_CHECK(esp_netif_init());
@@ -1392,6 +1356,27 @@ void app_main(void) {
   wifi_config_t wifi_config;
   res = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
 
+  /* Start the LED task */
+  led_strip_config_t strip_config = {.strip_gpio_num = 7,
+                                     .max_leds = LED_NUM,
+                                     .led_model = LED_MODEL_WS2812,
+                                     .color_component_format =
+                                         LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+                                     .flags = {.invert_out = false}};
+
+  led_strip_rmt_config_t rmt_config = {.clk_src = RMT_CLK_SRC_XTAL,
+                                       .resolution_hz = 10 * 1000 * 1000,
+                                       .mem_block_symbols = 192,
+                                       .flags = {
+                                           .with_dma = false,
+                                       }};
+
+  ESP_ERROR_CHECK(
+      led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+
+  xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
+              1, NULL);
+
   /* Start MQTT Initialization */
 
   const esp_mqtt_client_config_t mqtt_cfg = {
@@ -1408,8 +1393,8 @@ void app_main(void) {
 
   ESP_LOGI(WIFI_TAG, "SSID length on the NVS %d", ssid_len);
 
-  // If there's already a wifi configuration, check if at least the SSID is not
-  // empty
+  // If there's already a wifi configuration, check if at least the SSID is
+  // not empty
   if (res == ESP_OK && ssid_len != 0) {
     IMPROV_STATE = IMPROV_STATE_PROVISIONING;
     res = esp_wifi_connect();
