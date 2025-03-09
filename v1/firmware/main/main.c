@@ -76,6 +76,10 @@ static EventGroupHandle_t s_wifi_event_group;
 // MQTT client intialized on the start
 static esp_mqtt_client_handle_t mqtt_client;
 
+// Multipurpose LED state management, used differently for different function
+// Set to 0 if state changed!
+u_int8_t current_led_state = 0;
+
 // Counter to check how many times the WiFi tried to connect but failed
 // This variable is only used if the IMPROV_STATE is not equal to PROVISIONED
 // otherwise, the device will keep on trying to connect
@@ -512,6 +516,7 @@ void gatts_add_curr_char_idx() {
 // Indicate improv error state, both the error characteristics and the state
 // characteristics as well
 void indicate_improv_error(uint16_t conn_id) {
+  current_led_state = 0;
   esp_ble_gatts_send_indicate(improv_gatts_data.gatts_if, conn_id,
                               GATTS_STATE_CHAR.char_handle,
                               sizeof(IMPROV_STATE), &IMPROV_STATE, false);
@@ -1027,23 +1032,102 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 static void led_light_task() {
   ws2812_control_init();
 
-  u_int8_t current_led = 0;
-
   // Main task loop to handle the different type of LED lightings
   for (;;) {
     struct led_state current_state;
 
-    for (u_int8_t idx = 0; idx < NUM_LEDS; idx++) {
-      if (idx == current_led)
-        current_state.leds[idx] = 0xFF0000;
-      else
-        current_state.leds[idx] = 0x000000;
+    switch (IMPROV_STATE) {
+    case IMPROV_STATE_AUTHORIZED:
+      if (current_led_state > 0)
+        // Make sure this task doesn't use all the CPU
+        vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+
+      if (improv_wifi_curr_error_state == IMPROV_ERR_UNABLE_TO_CONN) {
+        // Set yellow if the device cannot connect to the WiFi
+        current_state.leds[0] = 0x0F0F00;
+        current_state.leds[1] = 0x0F0F00;
+        current_state.leds[2] = 0x0F0F00;
+        current_state.leds[3] = 0x0F0F00;
+      } else if (improv_wifi_curr_error_state != IMPROV_ERR_UNKNOWN_ERR) {
+        // Set red if the device cannot connect to the WiFi, and it's not user
+        // fixable
+        current_state.leds[0] = 0x0F0000;
+        current_state.leds[1] = 0x0F0000;
+        current_state.leds[2] = 0x0F0000;
+        current_state.leds[3] = 0x0F0000;
+      } else {
+        // Set orange when the user haven't setup the WiFi just yet
+        current_state.leds[0] = 0x070F00;
+        current_state.leds[1] = 0x070F00;
+        current_state.leds[2] = 0x070F00;
+        current_state.leds[3] = 0x070F00;
+      }
+
+      ws2812_write_leds(current_state);
+
+      current_led_state++;
+
+      vTaskDelay(pdMS_TO_TICKS(1000));
+
+      break;
+
+    case IMPROV_STATE_PROVISIONING:
+      // Rotate green around the device when the device is connecting to WiFi
+      for (u_int8_t idx = 0; idx < NUM_LEDS; idx++) {
+        if (idx == current_led_state)
+          current_state.leds[idx] = 0x1F0000;
+        else
+          current_state.leds[idx] = 0x000000;
+      }
+
+      ws2812_write_leds(current_state);
+
+      current_led_state = (current_led_state + 1) % NUM_LEDS;
+
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
+
+    case IMPROV_STATE_PROVISIONED:
+      // Blink green to let user know that the device successfully connected
+      if (current_led_state == 0) {
+        current_state.leds[0] = 0x0F0000;
+        current_state.leds[1] = 0x000000;
+        current_state.leds[2] = 0x0F0000;
+        current_state.leds[3] = 0x000000;
+
+        ws2812_write_leds(current_state);
+
+        vTaskDelay(pdMS_TO_TICKS(700));
+
+        current_state.leds[0] = 0x000000;
+        current_state.leds[1] = 0x0F0000;
+        current_state.leds[2] = 0x000000;
+        current_state.leds[3] = 0x0F0000;
+
+        ws2812_write_leds(current_state);
+
+        vTaskDelay(pdMS_TO_TICKS(700));
+
+        // Reset all the leds to off (standby)
+        current_state.leds[0] = 0x000000;
+        current_state.leds[1] = 0x000000;
+        current_state.leds[2] = 0x000000;
+        current_state.leds[3] = 0x000000;
+
+        ws2812_write_leds(current_state);
+
+        current_led_state++;
+      }
+
+      // TODO: handle MQTT data
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
+
+    default:
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
     }
-
-    ws2812_write_leds(current_state);
-    current_led = (current_led + 1) % NUM_LEDS;
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
 
@@ -1181,7 +1265,7 @@ void app_main(void) {
 
   /* Start the LED task */
   xTaskCreate(led_light_task, "LED_light_task", configMINIMAL_STACK_SIZE, NULL,
-              2, NULL);
+              1, NULL);
 
   /* Start WiFi NVS reconnection strategy */
   size_t ssid_len = strlen((char *)wifi_config.sta.ssid);
@@ -1212,17 +1296,20 @@ void app_main(void) {
         improv_wifi_curr_error_state = IMPROV_ERR_UNABLE_TO_CONN;
 
         xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        current_led_state = 0;
       } else {
         // Success!
         IMPROV_STATE = IMPROV_STATE_PROVISIONED;
         improv_wifi_curr_error_state = IMPROV_ERR_NO_ERROR;
 
         esp_mqtt_client_start(mqtt_client);
+        current_led_state = 0;
       }
     }
     // If somehow the esp_wifi_connect fails, set it back to authorized mode
     else {
       IMPROV_STATE = IMPROV_STATE_AUTHORIZED;
+      current_led_state = 0;
     }
   }
 
