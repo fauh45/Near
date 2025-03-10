@@ -1015,20 +1015,27 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   esp_mqtt_event_handle_t event = event_data;
   esp_mqtt_client_handle_t client = event->client;
 
-  int msg_id;
-
   switch ((esp_mqtt_event_id_t)event_id) {
   case MQTT_EVENT_CONNECTED:
     ESP_LOGI(MQTT_TAG, "MQTT_EVENT_CONNECTED");
 
-    msg_id = esp_mqtt_client_subscribe(client, NEAR_V1_MQTT_BROADCAST_TOPIC,
-                                       NEAR_V1_MQTT_BROADCAST_QOS);
-    ESP_LOGI(MQTT_TAG, "subscribe to broadcast successful, msg_id=%d", msg_id);
+    esp_mqtt_client_subscribe(client, NEAR_V1_MQTT_BROADCAST_TOPIC,
+                              NEAR_V1_MQTT_BROADCAST_QOS);
     break;
 
   case MQTT_EVENT_DISCONNECTED:
     ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DISCONNECTED, trying to reconnect...");
     esp_mqtt_client_reconnect(client);
+    break;
+
+  case MQTT_EVENT_SUBSCRIBED:
+    ESP_LOGI(MQTT_TAG, "MQTT_EVENT_SUBSCRIBED, sucessfully subscribed!");
+    break;
+
+  case MQTT_EVENT_UNSUBSCRIBED:
+    ESP_LOGI(MQTT_TAG, "MQTT_EVENT_UNSUBSCRIBED, resubscribing...");
+    esp_mqtt_client_subscribe(client, NEAR_V1_MQTT_BROADCAST_TOPIC,
+                              NEAR_V1_MQTT_BROADCAST_QOS);
     break;
 
   case MQTT_EVENT_DATA:
@@ -1040,9 +1047,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     mbedtls_base64_decode((unsigned char *)temp_message, 4, &temp_message_len,
                           (const unsigned char *)event->data, event->data_len);
 
-    ESP_LOG_BUFFER_HEX("LED", temp_message, temp_message_len);
+    ESP_LOG_BUFFER_HEX(MQTT_TAG, temp_message, temp_message_len);
 
-    // On authorized state, initial led state is 1, 0 is for the first time the
+    // On provisioned state, initial led state is 1, 0 is for the first time the
     // device reached authorized state
     current_led_state = 1;
 
@@ -1110,21 +1117,24 @@ static void led_light_task() {
   for (;;) {
     switch (IMPROV_STATE) {
     case IMPROV_STATE_AUTHORIZED:
-      if (current_led_state > 0)
+      if (current_led_state > 0) {
         // Make sure this task doesn't use all the CPU
         vTaskDelay(pdMS_TO_TICKS(1000));
-      continue;
+        continue;
+      }
+
+      led_strip_clear(led_strip);
 
       if (improv_wifi_curr_error_state == IMPROV_ERR_UNABLE_TO_CONN) {
         // Set yellow if the device cannot connect to the WiFi
         for (int i = 0; i < LED_NUM; i++) {
           led_strip_set_pixel(led_strip, i, 0x0F, 0x0F, 0x00);
         }
-      } else if (improv_wifi_curr_error_state != IMPROV_ERR_UNKNOWN_ERR) {
+      } else if (improv_wifi_curr_error_state != IMPROV_ERR_NO_ERROR) {
         // Set red if the device cannot connect to the WiFi, and it's not user
         // fixable
         for (int i = 0; i < LED_NUM; i++) {
-          led_strip_set_pixel(led_strip, i, 0x00, 0x0F, 0x00);
+          led_strip_set_pixel(led_strip, i, 0x0F, 0x00, 0x00);
         }
       } else {
         // Set orange when the user haven't setup the WiFi just yet
@@ -1143,47 +1153,58 @@ static void led_light_task() {
 
     case IMPROV_STATE_PROVISIONING:
       // Rotate green around the device when the device is connecting to WiFi
-      for (u_int8_t idx = 0; idx < LED_NUM; idx++) {
-        if (idx == current_led_state) {
-          led_strip_set_pixel(led_strip, idx, 0x00, 0x1F, 0x00);
-        } else
-          led_strip_set_pixel(led_strip, idx, 0x00, 0x00, 0x00);
-      }
+      led_strip_clear(led_strip);
 
+      for (int i = 0; i < LED_NUM; i++) {
+
+        if (i == current_led_state)
+          led_strip_set_pixel(led_strip, current_led_state, 0x00, 0x0F, 0x00);
+        else
+          led_strip_set_pixel(led_strip, i, 0x00, 0x00, 0x00);
+      }
       led_strip_refresh(led_strip);
 
       current_led_state = (current_led_state + 1) % LED_NUM;
 
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(700));
       break;
 
     case IMPROV_STATE_PROVISIONED:
       // Blink green to let user know that the device successfully connected
       if (current_led_state == 0) {
+        led_strip_clear(led_strip);
 
-        for (int i = 0; i < 3; i++) {
-          for (int j = 0; j < LED_NUM; j++) {
-            led_strip_set_pixel(led_strip, j, 0x00,
-                                (j & 1) == (i & 1) ? 0x0F : 0x00, 0x00);
-          }
-
-          vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        led_strip_set_pixel(led_strip, 0, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 1, 0x00, 0x00, 0x00);
+        led_strip_set_pixel(led_strip, 2, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 3, 0x00, 0x00, 0x00);
 
         led_strip_refresh(led_strip);
+
+        vTaskDelay(pdMS_TO_TICKS(700));
+
+        led_strip_clear(led_strip);
+
+        led_strip_set_pixel(led_strip, 0, 0x00, 0x00, 0x00);
+        led_strip_set_pixel(led_strip, 1, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 2, 0x00, 0x00, 0x00);
+        led_strip_set_pixel(led_strip, 3, 0x00, 0x0F, 0x00);
+
+        led_strip_refresh(led_strip);
+
+        vTaskDelay(pdMS_TO_TICKS(700));
 
         current_led_state = 0xFF;
       }
 
       if (current_led_state == 0xFF) {
-        // Reset all the leds to off (standby)
         led_strip_clear(led_strip);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(3000));
 
         continue;
       }
 
-      if (temp_message[0] == 0x01) {
+      if (temp_message_len == 4 && temp_message[0] == 0x01) {
         // If the flash done 3 times already, set done (0xFF)
         if (current_led_state > 4) {
           current_led_state = 0xFF;
@@ -1192,6 +1213,8 @@ static void led_light_task() {
 
           continue;
         }
+
+        led_strip_clear(led_strip);
 
         // Odd/Even switch on and off
         for (int i = 0; i < LED_NUM; i++) {
@@ -1212,13 +1235,14 @@ static void led_light_task() {
       else {
         free(temp_message);
         temp_message_len = 0;
-        temp_message_len = 0;
+
+        current_led_state = 0xFF;
       }
 
       break;
 
     default:
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(2000));
       break;
     }
   }
@@ -1252,8 +1276,8 @@ void app_main(void) {
 
   /* Start button initialization */
   button_config_t ack_btn_config = {0};
-  button_gpio_config_t ack_btn_gpio_config = {.gpio_num = 10,
-                                              .active_level = 0};
+  button_gpio_config_t ack_btn_gpio_config = {
+      .gpio_num = 10, .active_level = 0, .enable_power_save = true};
   button_handle_t ack_btn_handler_inst;
   ESP_ERROR_CHECK(iot_button_new_gpio_device(
       &ack_btn_config, &ack_btn_gpio_config, &ack_btn_handler_inst));
@@ -1364,8 +1388,8 @@ void app_main(void) {
                                          LED_STRIP_COLOR_COMPONENT_FMT_GRB,
                                      .flags = {.invert_out = false}};
 
-  led_strip_rmt_config_t rmt_config = {.clk_src = RMT_CLK_SRC_XTAL,
-                                       .resolution_hz = 10 * 1000 * 1000,
+  led_strip_rmt_config_t rmt_config = {.clk_src = RMT_CLK_SRC_DEFAULT,
+                                       .resolution_hz = 40 * 1000 * 1000,
                                        .mem_block_symbols = 192,
                                        .flags = {
                                            .with_dma = false,
@@ -1381,7 +1405,7 @@ void app_main(void) {
 
   const esp_mqtt_client_config_t mqtt_cfg = {
       .broker.address.uri = CONFIG_MQTT_HOSTNAME,
-      .broker.verification.certificate = (const char *)mqtt_host_pem_start
+      .broker.verification.certificate = (const char *)mqtt_host_pem_start,
       // TODO: add the chip id with custom prefix
   };
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
