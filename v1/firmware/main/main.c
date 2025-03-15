@@ -1128,18 +1128,18 @@ static void led_light_task() {
       if (improv_wifi_curr_error_state == IMPROV_ERR_UNABLE_TO_CONN) {
         // Set yellow if the device cannot connect to the WiFi
         for (int i = 0; i < LED_NUM; i++) {
-          led_strip_set_pixel(led_strip, i, 0x0F, 0x0F, 0x00);
+          led_strip_set_pixel(led_strip, i, 0x07, 0x07, 0x00);
         }
       } else if (improv_wifi_curr_error_state != IMPROV_ERR_NO_ERROR) {
         // Set red if the device cannot connect to the WiFi, and it's not user
         // fixable
         for (int i = 0; i < LED_NUM; i++) {
-          led_strip_set_pixel(led_strip, i, 0x0F, 0x00, 0x00);
+          led_strip_set_pixel(led_strip, i, 0x07, 0x00, 0x00);
         }
       } else {
         // Set orange when the user haven't setup the WiFi just yet
         for (int i = 0; i < LED_NUM; i++) {
-          led_strip_set_pixel(led_strip, i, 0x0F, 0x07, 0x00);
+          led_strip_set_pixel(led_strip, i, 0x07, 0x03, 0x00);
         }
       }
 
@@ -1158,7 +1158,7 @@ static void led_light_task() {
       for (int i = 0; i < LED_NUM; i++) {
 
         if (i == current_led_state)
-          led_strip_set_pixel(led_strip, current_led_state, 0x00, 0x0F, 0x00);
+          led_strip_set_pixel(led_strip, current_led_state, 0x00, 0x07, 0x00);
         else
           led_strip_set_pixel(led_strip, i, 0x00, 0x00, 0x00);
       }
@@ -1174,9 +1174,9 @@ static void led_light_task() {
       if (current_led_state == 0) {
         led_strip_clear(led_strip);
 
-        led_strip_set_pixel(led_strip, 0, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 0, 0x00, 0x07, 0x00);
         led_strip_set_pixel(led_strip, 1, 0x00, 0x00, 0x00);
-        led_strip_set_pixel(led_strip, 2, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 2, 0x00, 0x07, 0x00);
         led_strip_set_pixel(led_strip, 3, 0x00, 0x00, 0x00);
 
         led_strip_refresh(led_strip);
@@ -1186,9 +1186,9 @@ static void led_light_task() {
         led_strip_clear(led_strip);
 
         led_strip_set_pixel(led_strip, 0, 0x00, 0x00, 0x00);
-        led_strip_set_pixel(led_strip, 1, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 1, 0x00, 0x07, 0x00);
         led_strip_set_pixel(led_strip, 2, 0x00, 0x00, 0x00);
-        led_strip_set_pixel(led_strip, 3, 0x00, 0x0F, 0x00);
+        led_strip_set_pixel(led_strip, 3, 0x00, 0x07, 0x00);
 
         led_strip_refresh(led_strip);
 
