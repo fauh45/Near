@@ -1,0 +1,4 @@
+default: (merge-build "../flash_web/resources/merged-firmware.bin")
+
+merge-build output_dest:
+  python -m esptool --chip esp32c3 merge_bin -o {{ output_dest }} --flash_mode dio --flash_size 2MB --flash_freq 80m 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/near_v1.bin

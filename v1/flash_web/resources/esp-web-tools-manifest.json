@@ -1,0 +1,11 @@
+{
+  "name": "Near v1 Firmware",
+  "version": "2025.03.10",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C3",
+      "parts": [{ "path": "resources/merged-firmware.bin", "offset": 0 }]
+    }
+  ]
+}
