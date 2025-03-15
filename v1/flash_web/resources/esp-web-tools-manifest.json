@@ -5,7 +5,7 @@
   "builds": [
     {
       "chipFamily": "ESP32-C3",
-      "parts": [{ "path": "resources/merged-firmware.bin", "offset": 0 }]
+      "parts": [{ "path": "merged-firmware.bin", "offset": 0 }]
     }
   ]
 }
